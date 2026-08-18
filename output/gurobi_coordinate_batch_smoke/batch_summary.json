@@ -1,0 +1,19 @@
+[
+  {
+    "instance": "gurobi_small_exact",
+    "input_file": "input/gurobi_small_exact.json",
+    "status": "OPTIMAL",
+    "n_boxes": 6,
+    "max_pallets": 1,
+    "pallet_count": 1,
+    "objective_bound": 1.0,
+    "mip_gap": 0.0,
+    "runtime_seconds": 0.011200904846191406,
+    "variables": 547,
+    "linear_constraints": 1280,
+    "general_constraints": 90,
+    "output_directory": "output/gurobi_coordinate_batch_smoke/gurobi_small_exact",
+    "error_type": "",
+    "error": ""
+  }
+]

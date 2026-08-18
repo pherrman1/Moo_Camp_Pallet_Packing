@@ -1,0 +1,2 @@
+instance,input_file,status,n_boxes,max_pallets,pallet_count,objective_bound,mip_gap,runtime_seconds,variables,linear_constraints,general_constraints,output_directory,error_type,error
+gurobi_small_exact,input/gurobi_small_exact.json,OPTIMAL,6,1,1,1.0,0.0,0.011200904846191406,547,1280,90,output/gurobi_coordinate_batch_smoke/gurobi_small_exact,,

@@ -1,0 +1,6 @@
+{
+  "instance": "pl052_n042_H1800_M1_LB2UB3",
+  "input_file": "tests/instances/pl052_n042_H1800_M1_LB2UB3.json",
+  "error_type": "GurobiError",
+  "error": "Model too large for size-limited license; visit https://gurobi.com/unrestricted for more information"
+}

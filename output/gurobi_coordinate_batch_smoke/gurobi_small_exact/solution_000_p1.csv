@@ -1,0 +1,7 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,original_length_mm,original_width_mm,original_height_mm,weight_kg,family,is_food,is_chemical,fragile,retrieval_priority,support_fraction
+0,1,1,1,1,0,0,0,400,600,300,600,400,300,32.0,household_chem,False,True,False,4,1.0
+1,2,1,1,1,0,0,300,400,600,300,600,400,300,32.0,household_chem,False,True,False,4,1.0
+2,3,2,1,1,0,0,600,400,600,250,600,400,250,24.0,beverages,True,False,False,3,1.0
+3,4,2,1,1,0,0,850,400,600,250,600,400,250,24.0,beverages,True,False,False,3,1.0
+4,5,3,1,1,400,0,0,800,600,200,600,800,200,12.0,dry_food,True,False,False,2,1.0
+5,6,3,1,1,400,0,200,800,600,200,600,800,200,12.0,dry_food,True,False,False,2,1.0

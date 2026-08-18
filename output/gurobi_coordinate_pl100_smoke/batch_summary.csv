@@ -1,0 +1,2 @@
+instance,input_file,status,n_boxes,max_pallets,pallet_count,objective_bound,mip_gap,runtime_seconds,variables,linear_constraints,general_constraints,output_directory,error_type,error
+pl001_n010_H900_B2_LB2UB2,tests/instances/pl001_n010_H900_B2_LB2UB2.json,ERROR,,2,,,,0.08425959400483407,,,,output/gurobi_coordinate_pl100_smoke/pl001_n010_H900_B2_LB2UB2,GurobiError,Model too large for size-limited license; visit https://gurobi.com/unrestricted for more information

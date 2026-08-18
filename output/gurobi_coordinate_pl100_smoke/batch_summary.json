@@ -1,0 +1,19 @@
+[
+  {
+    "instance": "pl001_n010_H900_B2_LB2UB2",
+    "input_file": "tests/instances/pl001_n010_H900_B2_LB2UB2.json",
+    "status": "ERROR",
+    "n_boxes": "",
+    "max_pallets": 2,
+    "pallet_count": "",
+    "objective_bound": "",
+    "mip_gap": "",
+    "runtime_seconds": 0.08425959400483407,
+    "variables": "",
+    "linear_constraints": "",
+    "general_constraints": "",
+    "output_directory": "output/gurobi_coordinate_pl100_smoke/pl001_n010_H900_B2_LB2UB2",
+    "error_type": "GurobiError",
+    "error": "Model too large for size-limited license; visit https://gurobi.com/unrestricted for more information"
+  }
+]
