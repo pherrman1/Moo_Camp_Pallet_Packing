@@ -274,6 +274,27 @@ class PositionIndexedMILP:
         self._build_objectives()
         self.model.update()
 
+    def dump_model(self, lp_path: str | Path | None = None, print_stats: bool = False) -> None:
+        """Export the instantiated MILP and optionally print Gurobi statistics.
+
+        The LP file contains the placement, pallet-use, height, spread, and
+        accessibility variables together with every generated constraint for
+        this concrete input instance.  It is written after all model-building
+        routines have run, but before any objective-specific constraints are
+        added by the Pareto loop.
+        """
+        self.model.update()
+        if print_stats:
+            self.model.printStats()
+            print(f"Variables: {self.model.NumVars}")
+            print(f"Constraints: {self.model.NumConstrs}")
+            print(f"Placements: {len(self.placements)}")
+        if lp_path is not None:
+            path = Path(lp_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.model.write(str(path))
+            print(f"Wrote MILP: {path}")
+
     def _build_geometry(self, exact_pallet_count: int) -> None:
         for item in self.items:
             self.model.addConstr(
@@ -531,7 +552,13 @@ def nondominated(solutions: list[ExactSolution]) -> list[ExactSolution]:
     return sorted(unique.values(), key=lambda s: (s.pallet_count, s.height_spread, s.accessibility, s.vertical_moment))
 
 
-def solve_pareto(context: dict, items: list[ExactItem], config: dict[str, Any]) -> list[ExactSolution]:
+def solve_pareto(
+    context: dict,
+    items: list[ExactItem],
+    config: dict[str, Any],
+    model_dump: str | Path | None = None,
+    print_model: bool = False,
+) -> list[ExactSolution]:
     total_volume = sum(np.prod(item.dims) for item in items)
     pallet_volume = context["pallet"]["length"] * context["pallet"]["width"] * context["pallet"]["height"]
     lower_bound = max(1, math.ceil(total_volume / pallet_volume))
@@ -540,6 +567,16 @@ def solve_pareto(context: dict, items: list[ExactItem], config: dict[str, Any]) 
     for pallet_count in range(lower_bound, int(config["max_pallets"]) + 1):
         started = time.perf_counter()
         exact = PositionIndexedMILP(context, items, config, pallet_count)
+        if model_dump is not None or print_model:
+            dump_path = None
+            if model_dump is not None:
+                requested = Path(model_dump)
+                if pallet_count == lower_bound:
+                    dump_path = requested if requested.suffix else requested.with_suffix(".lp")
+                else:
+                    suffix = requested.suffix or ".lp"
+                    dump_path = requested.with_name(f"{requested.stem}_p{pallet_count}{suffix}")
+            exact.dump_model(dump_path, print_stats=print_model)
         exact.optimize_expression(exact.spread, f"spread_{pallet_count}_pallets")
         optimal_spread = int(math.ceil(exact.spread.X - 1e-8))
         spread_constraint = exact.model.addConstr(exact.spread <= optimal_spread, name="fix_optimal_spread")
@@ -740,6 +777,17 @@ def main() -> int:
     parser.add_argument("--output-dir", default="output/gurobi_exact", help="result directory")
     parser.add_argument("--time-limit", type=float, default=None)
     parser.add_argument("--max-pallets", type=int, default=None)
+    parser.add_argument(
+        "--write-lp",
+        default=None,
+        metavar="PATH",
+        help="write the instantiated Gurobi MILP to an LP file before optimization",
+    )
+    parser.add_argument(
+        "--print-model",
+        action="store_true",
+        help="print Gurobi model statistics before optimization",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -748,7 +796,13 @@ def main() -> int:
     if args.max_pallets is not None:
         config["max_pallets"] = args.max_pallets
     context, items = read_mcpp_json(args.input, config)
-    solutions = solve_pareto(context, items, config)
+    solutions = solve_pareto(
+        context,
+        items,
+        config,
+        model_dump=args.write_lp,
+        print_model=args.print_model,
+    )
     write_outputs(
         solutions,
         items,
