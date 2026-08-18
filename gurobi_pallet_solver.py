@@ -279,9 +279,8 @@ class PositionIndexedMILP:
 
         The LP file contains the placement, pallet-use, height, spread, and
         accessibility variables together with every generated constraint for
-        this concrete input instance.  It is written after all model-building
-        routines have run, but before any objective-specific constraints are
-        added by the Pareto loop.
+        this concrete input instance. It is written after all model-building
+        routines have run, but before later Pareto-stage constraints are added.
         """
         self.model.update()
         if print_stats:
@@ -576,6 +575,9 @@ def solve_pareto(
                 else:
                     suffix = requested.suffix or ".lp"
                     dump_path = requested.with_name(f"{requested.stem}_p{pallet_count}{suffix}")
+            # Export the first objective that Gurobi actually optimizes. Later
+            # Pareto stages replace this objective and add their own bounds.
+            exact.model.setObjective(exact.spread, GRB.MINIMIZE)
             exact.dump_model(dump_path, print_stats=print_model)
         exact.optimize_expression(exact.spread, f"spread_{pallet_count}_pallets")
         optimal_spread = int(math.ceil(exact.spread.X - 1e-8))
