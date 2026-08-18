@@ -19,3 +19,11 @@ htmlcov/
 
 cache/
 assets/__generated_theme.css
+
+# Local LaTeX build products
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+/MILP_formulation.pdf
