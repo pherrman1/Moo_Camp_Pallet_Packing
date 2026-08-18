@@ -42,7 +42,48 @@ python gurobi_coordinate_solver.py \
 currently installed size-limited Gurobi license. Instances requiring several
 pallets will generally require an unrestricted academic or WLS license.
 
-## 3. Result files
+## 3. Run all benchmark instances
+
+The batch mode processes every matching JSON file in lexical order. Each
+instance receives a directory named after its JSON filename:
+
+```bash
+python gurobi_coordinate_solver.py \
+  --input-dir tests/instances \
+  --pattern "pl*.json" \
+  --config configs/gurobi_coordinate_default.json \
+  --output-dir output/gurobi_coordinate_batch \
+  --time-limit 60
+```
+
+If `--max-pallets` is omitted, the solver reads the heuristic upper bound from
+each PL-100 instance and uses two or three candidate pallets as appropriate.
+Supplying `--max-pallets` overrides this behavior for every instance.
+
+Results are stored as:
+
+```text
+output/gurobi_coordinate_batch/
+  batch_summary.csv
+  batch_summary.json
+  pl001_n010_H900_B2_LB2UB2/
+    solution_000_p2.csv
+    solution_000_p2.json
+    solution_000_p2.html
+  pl002_n010_H900_2_LB2UB3/
+    ...
+```
+
+If an instance fails, the batch continues and writes `error.json` in that
+instance directory. The combined summaries contain the status and error. Use
+`--fail-fast` if the run should stop after the first failure.
+
+The installed size-limited Gurobi license is not large enough for most of these
+two- and three-pallet models. Batch iteration and error reporting still work,
+but computing the benchmark solutions requires an unrestricted academic or WLS
+license.
+
+## 4. Result files
 
 The command writes the following files under `output/gurobi_coordinate/`:
 
@@ -54,10 +95,12 @@ The command writes the following files under `output/gurobi_coordinate/`:
 The program checks pallet boundaries, three-dimensional non-overlap, and the
 required support fraction again after extracting the Gurobi solution.
 
-## 4. Input JSON
+## 5. Input JSON
 
-The solver accepts the same MCPP JSON structure as `gurobi_pallet_solver.py`.
-Pallet and box dimensions are expressed in millimetres. An item minimally needs:
+The solver accepts both the MCPP `items` schema used by
+`gurobi_pallet_solver.py` and the PL-100 `boxes` schema under
+`tests/instances`. Pallet and box dimensions are expressed in millimetres. An
+MCPP item minimally needs:
 
 ```json
 {
@@ -73,7 +116,7 @@ Optional fields such as `weight_kg`, `family`, `is_food`, `is_chemical`,
 `fragile`, `upright_only`, and `retrieval_priority` are preserved in the result.
 They are reserved for later model extensions.
 
-## 5. Important configuration fields
+## 6. Important configuration fields
 
 Edit `configs/gurobi_coordinate_default.json` or provide another config file:
 
@@ -90,7 +133,7 @@ Edit `configs/gurobi_coordinate_default.json` or provide another config file:
 The current objective is only the number of used pallets. Accessibility,
 weight placement, and food/chemical rules are not active yet.
 
-## 6. Run from PyCharm
+## 7. Run from PyCharm
 
 Create a Python run configuration with:
 
@@ -103,7 +146,7 @@ Create a Python run configuration with:
 --input input/gurobi_small_exact.json --config configs/gurobi_coordinate_default.json --output-dir output/gurobi_coordinate --max-pallets 1 --time-limit 30 --print-model
 ```
 
-## 7. Useful optional commands
+## 8. Useful optional commands
 
 Show all arguments:
 

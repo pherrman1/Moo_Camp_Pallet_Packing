@@ -10,9 +10,11 @@ multi-objective extensions.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import math
+import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from fractions import Fraction
@@ -91,12 +93,16 @@ def snap_up(value_mm: float, grid_mm: int) -> int:
 
 def pallet_axes(raw: dict[str, Any]) -> tuple[float, float, float]:
     """Accept both width/depth/height and length/width/height schemas."""
+    if {"L_mm", "W_mm", "H_mm"} <= raw.keys():
+        return float(raw["L_mm"]), float(raw["W_mm"]), float(raw["H_mm"])
     if "depth" in raw:
         return float(raw.get("length", raw["width"])), float(raw["depth"]), float(raw["height"])
     return float(raw["length"]), float(raw["width"]), float(raw["height"])
 
 
 def item_axes(raw: dict[str, Any]) -> tuple[float, float, float]:
+    if {"w_mm", "d_mm", "h_mm"} <= raw.keys():
+        return float(raw["w_mm"]), float(raw["d_mm"]), float(raw["h_mm"])
     if "depth" in raw:
         return float(raw.get("length", raw["width"])), float(raw["depth"]), float(raw["height"])
     return float(raw["length"]), float(raw["width"]), float(raw["height"])
@@ -124,12 +130,21 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict[str, 
     if min(pallet["length"], pallet["width"], pallet["height"]) <= 0:
         raise ValueError("pallet dimensions must be at least one grid unit")
 
+    records = payload.get("items", payload.get("boxes"))
+    if records is None:
+        raise ValueError("instance JSON must contain an 'items' or 'boxes' array")
     items: list[CoordinateItem] = []
-    for index, raw in enumerate(payload["items"]):
+    for index, raw in enumerate(records):
         axes = item_axes(raw)
-        original = tuple(int(round(value)) for value in axes)
+        original_axes = (
+            float(raw.get("raw_w_mm", axes[0])),
+            float(raw.get("raw_d_mm", axes[1])),
+            float(raw.get("raw_h_mm", axes[2])),
+        )
+        original = tuple(int(round(value)) for value in original_axes)
         dims = tuple(snap_up(value, grid) for value in axes)
         volume_dm3 = float(raw.get("volume_dm3", np.prod(original) / 1e6))
+        group = str(raw.get("group", "")).lower()
         items.append(
             CoordinateItem(
                 index=index,
@@ -139,12 +154,12 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict[str, 
                 dims=dims,
                 weight_kg=float(raw.get("weight_kg", 1.0)),
                 volume_dm3=volume_dm3,
-                family=str(raw.get("family", "unknown")),
-                is_food=bool(raw.get("is_food", False)),
-                is_chemical=bool(raw.get("is_chemical", False)),
+                family=str(raw.get("family", group or "unknown")),
+                is_food=bool(raw.get("is_food", group == "food")),
+                is_chemical=bool(raw.get("is_chemical", group == "chemical")),
                 fragile=bool(raw.get("fragile", False)),
                 upright_only=bool(raw.get("upright_only", False)),
-                retrieval_priority=int(raw.get("retrieval_priority", 1)),
+                retrieval_priority=int(raw.get("retrieval_priority", raw.get("priority", 1))),
             )
         )
 
@@ -154,6 +169,17 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict[str, 
     if len(items) > max_items:
         raise ValueError(f"coordinate model is configured for at most {max_items} items; got {len(items)}")
     return {"payload": payload, "pallet": pallet, "grid_mm": grid}, items
+
+
+def recommended_max_pallets(payload: dict[str, Any]) -> int | None:
+    """Read a certified/heuristic upper bound when a benchmark provides one."""
+    bounds = payload.get("meta", {}).get("bounds", {})
+    value = bounds.get("ub_pallets_heuristic")
+    if value is None:
+        certified = bounds.get("certified_optimum_in")
+        if isinstance(certified, list) and certified:
+            value = certified[-1]
+    return int(value) if value is not None else None
 
 
 def allowed_orientations(item: CoordinateItem, mode: str) -> list[tuple[int, int, int]]:
@@ -768,6 +794,7 @@ def write_outputs(
     total_volume = sum(placement.dx * placement.dy * placement.dz for placement in solution.placements)
     available_volume = solution.pallet_count * pallet["length"] * pallet["width"] * pallet["height"]
     payload = {
+        "instance": context.get("payload", {}).get("meta", {}).get("name", "unknown"),
         "formulation": "coordinate-based pairwise non-overlap MILP",
         "metrics": {
             "status": solution.status,
@@ -797,36 +824,198 @@ def write_outputs(
     render_solution(solution, items, context, output_dir / f"{stem}.html")
 
 
+def instance_config(
+    base_config: dict[str, Any],
+    input_path: Path,
+    time_limit: float | None,
+    max_pallets: int | None,
+) -> dict[str, Any]:
+    config = copy.deepcopy(base_config)
+    if time_limit is not None:
+        config["time_limit_seconds"] = time_limit
+    if max_pallets is not None:
+        config["max_pallets"] = max_pallets
+    else:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+        recommended = recommended_max_pallets(payload)
+        if recommended is not None:
+            config["max_pallets"] = max(int(config.get("max_pallets", 1)), recommended)
+    return config
+
+
+def solve_instance(
+    input_path: Path,
+    config: dict[str, Any],
+    output_dir: Path,
+    model_dump: str | Path | None,
+    print_model: bool,
+) -> tuple[CoordinateSolution, dict[str, Any], list[CoordinateItem], dict[str, int]]:
+    context, items = read_mcpp_json(input_path, config)
+    exact = CoordinateBasedMILP(context, items, config)
+    try:
+        exact.dump_model(model_dump, print_model)
+        stats = {
+            "variables": exact.model.NumVars,
+            "linear_constraints": exact.model.NumConstrs,
+            "general_constraints": exact.model.NumGenConstrs,
+        }
+        solution = exact.solve()
+        support_config = config.get("support", {"mode": "fraction", "minimum_fraction": 0.75})
+        audit_solution(
+            solution,
+            context,
+            str(support_config.get("mode", "fraction")),
+            float(support_config.get("minimum_fraction", 0.75)),
+        )
+        write_outputs(solution, items, context, output_dir)
+        return solution, context, items, stats
+    finally:
+        exact.model.dispose()
+
+
+def batch_lp_path(requested: str | None, instance_stem: str) -> Path | None:
+    if requested is None:
+        return None
+    path = Path(requested)
+    if path.suffix:
+        return path.with_name(f"{path.stem}_{instance_stem}{path.suffix}")
+    return path / instance_stem / "model.lp"
+
+
+def write_batch_summary(records: list[dict[str, Any]], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "instance",
+        "input_file",
+        "status",
+        "n_boxes",
+        "max_pallets",
+        "pallet_count",
+        "objective_bound",
+        "mip_gap",
+        "runtime_seconds",
+        "variables",
+        "linear_constraints",
+        "general_constraints",
+        "output_directory",
+        "error_type",
+        "error",
+    ]
+    with (output_dir / "batch_summary.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows({field: record.get(field, "") for field in fields} for record in records)
+    (output_dir / "batch_summary.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+
+def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
+    input_dir = Path(args.input_dir)
+    instances = sorted(path for path in input_dir.glob(args.pattern) if path.is_file())
+    if not instances:
+        raise ValueError(f"no files matching {args.pattern!r} found in {input_dir}")
+
+    output_root = Path(args.output_dir)
+    records: list[dict[str, Any]] = []
+    failures = 0
+    for number, input_path in enumerate(instances, start=1):
+        name = input_path.stem
+        instance_output = output_root / name
+        config = instance_config(base_config, input_path, args.time_limit, args.max_pallets)
+        started = time.perf_counter()
+        print(f"[{number}/{len(instances)}] {name}")
+        try:
+            solution, context, items, stats = solve_instance(
+                input_path,
+                config,
+                instance_output,
+                batch_lp_path(args.write_lp, name),
+                args.print_model,
+            )
+            record = {
+                "instance": context.get("payload", {}).get("meta", {}).get("name", name),
+                "input_file": str(input_path),
+                "status": solution.status,
+                "n_boxes": len(items),
+                "max_pallets": int(config["max_pallets"]),
+                "pallet_count": solution.pallet_count,
+                "objective_bound": solution.objective_bound,
+                "mip_gap": solution.mip_gap,
+                "runtime_seconds": solution.runtime_seconds,
+                **stats,
+                "output_directory": str(instance_output),
+                "error_type": "",
+                "error": "",
+            }
+            print(
+                f"  {solution.status}: pallets={solution.pallet_count}, "
+                f"gap={100 * solution.mip_gap:.3f}%, runtime={solution.runtime_seconds:.2f}s"
+            )
+        except Exception as exc:  # Continue so one difficult instance does not lose the batch report.
+            failures += 1
+            instance_output.mkdir(parents=True, exist_ok=True)
+            error_payload = {
+                "instance": name,
+                "input_file": str(input_path),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            (instance_output / "error.json").write_text(json.dumps(error_payload, indent=2), encoding="utf-8")
+            record = {
+                "instance": name,
+                "input_file": str(input_path),
+                "status": "ERROR",
+                "n_boxes": "",
+                "max_pallets": int(config.get("max_pallets", 0)),
+                "pallet_count": "",
+                "objective_bound": "",
+                "mip_gap": "",
+                "runtime_seconds": time.perf_counter() - started,
+                "variables": "",
+                "linear_constraints": "",
+                "general_constraints": "",
+                "output_directory": str(instance_output),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            print(f"  ERROR ({type(exc).__name__}): {exc}")
+        records.append(record)
+        write_batch_summary(records, output_root)
+        if failures and args.fail_fast:
+            break
+
+    print(f"Batch complete: {len(records) - failures} solved, {failures} failed; wrote {output_root}")
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="MCPP JSON instance")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", help="one MCPP/PL-100 JSON instance")
+    source.add_argument("--input-dir", help="directory containing JSON instances for a batch run")
+    parser.add_argument("--pattern", default="*.json", help="batch filename pattern (default: *.json)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="coordinate-model JSON configuration")
     parser.add_argument("--output-dir", default="output/gurobi_coordinate", help="result directory")
     parser.add_argument("--time-limit", type=float, default=None, help="override the configuration time limit")
     parser.add_argument("--max-pallets", type=int, default=None, help="override the maximum candidate pallets")
     parser.add_argument("--write-lp", default=None, metavar="PATH", help="write the instantiated MILP before solving")
     parser.add_argument("--print-model", action="store_true", help="print Gurobi model statistics")
+    parser.add_argument("--fail-fast", action="store_true", help="stop a batch after the first failed instance")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    if args.time_limit is not None:
-        config["time_limit_seconds"] = args.time_limit
-    if args.max_pallets is not None:
-        config["max_pallets"] = args.max_pallets
+    base_config = load_config(args.config)
+    if args.input_dir:
+        return run_batch(args, base_config)
 
-    context, items = read_mcpp_json(args.input, config)
-    exact = CoordinateBasedMILP(context, items, config)
-    exact.dump_model(args.write_lp, args.print_model)
-    solution = exact.solve()
-    support_config = config.get("support", {"mode": "fraction", "minimum_fraction": 0.75})
-    audit_solution(
-        solution,
-        context,
-        str(support_config.get("mode", "fraction")),
-        float(support_config.get("minimum_fraction", 0.75)),
-    )
+    input_path = Path(args.input)
+    config = instance_config(base_config, input_path, args.time_limit, args.max_pallets)
     output_dir = Path(args.output_dir)
-    write_outputs(solution, items, context, output_dir)
+    solution, _, _, _ = solve_instance(
+        input_path,
+        config,
+        output_dir,
+        args.write_lp,
+        args.print_model,
+    )
     print(
         f"Status={solution.status}; pallets={solution.pallet_count}; "
         f"gap={100 * solution.mip_gap:.3f}%; runtime={solution.runtime_seconds:.2f}s"

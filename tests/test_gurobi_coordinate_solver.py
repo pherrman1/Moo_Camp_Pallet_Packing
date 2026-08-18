@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from gurobi_coordinate_solver import (
     CoordinateItem,
@@ -7,6 +8,8 @@ from gurobi_coordinate_solver import (
     allowed_orientations,
     audit_solution,
     footprint_overlap,
+    read_mcpp_json,
+    recommended_max_pallets,
     snap_up,
     support_fraction,
 )
@@ -44,6 +47,23 @@ class TestCoordinateGeometry(unittest.TestCase):
         context = {"pallet": {"length": 100, "width": 100, "height": 100}}
         with self.assertRaises(RuntimeError):
             audit_solution(solution, context, "off", 0.75)
+
+    def test_all_pl100_instances_use_the_supported_schema(self):
+        instance_dir = Path(__file__).parent / "instances"
+        files = sorted(instance_dir.glob("pl*.json"))
+        self.assertEqual(len(files), 100)
+        config = {"grid_mm": 50, "max_items": 100}
+        for path in files:
+            context, items = read_mcpp_json(path, config)
+            self.assertEqual(len(items), context["payload"]["meta"]["n"])
+            self.assertEqual(context["pallet"]["length"], 24)
+            self.assertEqual(context["pallet"]["width"], 16)
+
+    def test_benchmark_upper_bound_is_used_for_batch_capacity(self):
+        payload = {
+            "meta": {"bounds": {"ub_pallets_heuristic": 3}}
+        }
+        self.assertEqual(recommended_max_pallets(payload), 3)
 
 
 if __name__ == "__main__":

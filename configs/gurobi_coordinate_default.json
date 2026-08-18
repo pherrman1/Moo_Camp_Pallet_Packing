@@ -1,10 +1,10 @@
 {
   "grid_mm": 50,
-  "max_items": 30,
+  "max_items": 100,
   "max_pallets": 2,
   "time_limit_seconds": 300,
   "mip_gap": 0.0,
-  "log_to_console": true,
+  "log_to_console": false,
   "rotation_mode": "yaw",
   "support": {
     "mode": "fraction",
