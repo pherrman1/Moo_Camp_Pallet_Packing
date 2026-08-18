@@ -1,0 +1,18 @@
+{
+  "grid_mm": 50,
+  "max_items": 30,
+  "max_pallets": 2,
+  "time_limit_seconds": 300,
+  "mip_gap": 0.0,
+  "log_to_console": true,
+  "rotation_mode": "yaw",
+  "support": {
+    "mode": "fraction",
+    "minimum_fraction": 0.75
+  },
+  "symmetry": {
+    "fix_first_item": true,
+    "order_pallet_loads": true,
+    "order_identical_items": true
+  }
+}
