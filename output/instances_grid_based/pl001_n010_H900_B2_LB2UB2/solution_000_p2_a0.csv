@@ -1,0 +1,11 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,weight_kg,density_kg_m3,family,is_food,is_chemical,fragile,retrieval_priority,support_fraction
+0,1,1,1,1,550,50,500,550,750,250,20.8,242.37283000575636,personal_care,False,True,False,6,0.8181818181818182
+1,2,1,2,0,0,250,500,750,550,250,21.64,252.1609635252196,personal_care,False,True,False,6,1.0
+2,3,1,1,1,650,50,250,550,750,250,18.91,220.34952958696405,personal_care,False,True,False,6,0.9090909090909091
+3,4,1,2,0,0,250,250,750,550,250,23.25,270.92155277085743,personal_care,False,True,False,6,1.0
+4,5,1,2,1,650,50,0,550,750,250,21.88,254.95757310220907,personal_care,False,True,False,6,1.0
+5,6,2,2,0,450,0,250,500,250,300,23.96,851.4963377839061,beverages,True,False,False,3,0.8
+6,7,2,1,1,0,0,0,250,500,300,23.09,820.578065084741,beverages,True,False,False,3,1.0
+7,8,3,1,1,500,50,0,650,750,250,12.55,135.1825880517981,non_food,False,False,False,7,1.0
+8,9,3,2,1,0,50,0,650,750,250,13.04,140.46063332234638,non_food,False,False,False,7,1.0
+9,10,4,2,1,750,250,250,450,550,200,25.0,641.9292799350882,beverages,True,False,False,3,1.0

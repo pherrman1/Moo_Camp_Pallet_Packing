@@ -1,0 +1,2 @@
+status,pallet_count,volume_utilization,objective_bound,mip_gap,runtime_seconds
+TIME_LIMIT,3,0.37688078703703703,2.0,0.3333333333333333,30.147182999993674

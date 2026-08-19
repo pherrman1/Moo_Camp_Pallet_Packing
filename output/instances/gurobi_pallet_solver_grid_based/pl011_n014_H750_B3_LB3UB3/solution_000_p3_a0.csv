@@ -1,0 +1,15 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,weight_kg,density_kg_m3,family,is_food,is_chemical,fragile,retrieval_priority,support_fraction
+0,1,1,2,0,0,400,0,400,300,500,25.0,476.262142303318,beverages,True,False,False,3,1.0
+1,2,1,1,1,500,0,0,300,400,500,25.0,476.262142303318,beverages,True,False,False,2,1.0
+2,3,1,1,0,800,500,0,400,300,500,25.0,476.262142303318,beverages,True,False,False,3,1.0
+3,4,2,3,0,0,400,0,650,400,400,15.16,170.01081071382112,non_food,False,False,False,6,1.0
+4,5,2,3,1,700,0,0,400,650,400,20.35,228.21372018642873,non_food,False,False,False,7,1.0
+5,6,2,1,0,0,400,0,650,400,400,24.18,271.1650002018598,non_food,False,False,False,7,1.0
+6,7,2,3,0,0,0,0,650,400,400,21.89,245.48394765999632,non_food,False,False,False,7,1.0
+7,8,2,2,0,0,0,0,650,400,400,14.0,157.00206794152345,non_food,False,False,True,7,1.0
+8,9,3,3,1,0,0,400,500,600,250,12.02,209.7822767136437,personal_care,False,True,False,5,1.0
+9,10,4,1,0,0,0,0,500,300,450,25.0,496.9645405861001,beverages,True,False,False,3,1.0
+10,11,4,1,1,800,0,0,300,500,450,25.0,496.9645405861001,beverages,True,False,False,3,1.0
+11,12,4,2,0,400,500,0,500,300,450,25.0,496.9645405861001,beverages,True,False,False,3,1.0
+12,13,4,2,0,700,0,0,500,300,450,25.0,496.9645405861001,beverages,True,False,False,3,1.0
+13,14,5,1,0,0,450,400,550,350,300,23.02,512.5373493224799,canned_food,True,False,False,4,1.0

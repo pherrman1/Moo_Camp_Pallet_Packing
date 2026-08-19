@@ -1,0 +1,11 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,weight_kg,density_kg_m3,family,is_food,is_chemical,fragile,retrieval_priority,support_fraction
+0,1,1,1,1,0,150,0,350,650,250,6.54,159.1283465007579,snacks_bakery,True,False,False,2,1.0
+1,2,2,1,0,400,0,0,700,400,400,25.0,257.2140833970367,canned_food,True,False,False,4,1.0
+2,3,2,1,0,400,400,0,700,400,400,25.0,257.2140833970367,canned_food,True,False,False,4,1.0
+3,4,3,1,1,0,450,250,250,350,200,10.7,803.0983082396385,beverages,True,False,False,3,1.0
+4,5,4,3,1,750,0,0,450,650,350,19.24,250.4464820339795,dry_food,True,False,False,4,1.0
+5,6,4,2,1,750,0,0,450,650,350,18.07,235.21662839677805,dry_food,True,False,False,4,1.0
+6,7,4,2,1,0,0,0,450,650,350,16.85,219.33592631354233,dry_food,True,False,False,4,1.0
+7,8,4,3,1,0,0,0,450,650,350,21.36,278.0424561458317,dry_food,True,False,False,4,1.0
+8,9,5,3,1,0,0,350,250,400,100,2.71,466.82284848067246,chilled_food,True,False,False,1,1.0
+9,10,5,2,1,800,350,350,250,400,100,2.08,358.29945566044233,chilled_food,True,False,False,1,0.75

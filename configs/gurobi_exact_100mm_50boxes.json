@@ -1,0 +1,30 @@
+{
+  "grid_mm": 100,
+  "max_items": 50,
+  "max_pallets": 1,
+  "time_limit_seconds": 300,
+  "mip_gap": 0.0,
+  "log_to_console": false,
+  "rotation_mode": "yaw",
+  "support": {
+    "mode": "fraction",
+    "minimum_fraction": 0.75
+  },
+  "food_chemical": {
+    "mode": "hard_overlap"
+  },
+  "fragile": {
+    "cannot_support": true
+  },
+  "vertical_moment": {
+    "mode": "density"
+  },
+  "accessibility": {
+    "mode": "soft_count"
+  },
+  "pareto": {
+    "enumerate_pallet_counts": false,
+    "max_accessibility_epsilon": 0,
+    "render_all_solutions": true
+  }
+}

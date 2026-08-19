@@ -90,8 +90,40 @@ def snap_up(value_mm: float, grid_mm: int) -> int:
 
 def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict, list[ExactItem]]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    grid = int(config["grid_mm"])
+    configured_grid = config["grid_mm"]
+    if configured_grid == "input":
+        grid = int(payload.get("meta", {}).get("grid_mm", 50))
+    else:
+        grid = int(configured_grid)
     pallet_raw = payload["pallet"]
+    testset_format = "boxes" in payload
+    if testset_format:
+        pallet_raw = {
+            "width": payload["pallet"]["L_mm"],
+            "depth": payload["pallet"]["W_mm"],
+            "height": payload["pallet"]["H_mm"],
+            "name": payload.get("meta", {}).get("name", "test_instance"),
+        }
+        raw_items = [
+            {
+                "id": item["id"],
+                "sku": item.get("sku", item["id"]),
+                "width": item["w_mm"],
+                "depth": item["d_mm"],
+                "height": item["h_mm"],
+                "weight_kg": item.get("weight_kg", 1.0),
+                "volume_dm3": item.get("volume_dm3"),
+                "family": item.get("family", item.get("group", "unknown")),
+                "is_food": item.get("group") == "food",
+                "is_chemical": item.get("group") == "chemical",
+                "fragile": item.get("fragile", False),
+                "upright_only": item.get("upright_only", False),
+                "retrieval_priority": item.get("priority", item.get("seq", 1)),
+            }
+            for item in payload["boxes"]
+        ]
+    else:
+        raw_items = payload["items"]
     pallet = {
         "length": int(round(float(pallet_raw["width"]) / grid)),
         "width": int(round(float(pallet_raw["depth"]) / grid)),
@@ -102,7 +134,7 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict, list
         "name": pallet_raw.get("name", "pallet"),
     }
     items: list[ExactItem] = []
-    for index, raw in enumerate(payload["items"]):
+    for index, raw in enumerate(raw_items):
         original = (
             int(round(float(raw["width"]))),
             int(round(float(raw["depth"]))),
@@ -134,7 +166,12 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict, list
         raise ValueError(
             f"exact model is configured for at most {config['max_items']} items; got {len(items)}"
         )
-    return {"payload": payload, "pallet": pallet, "grid_mm": grid}, items
+    return {
+        "payload": payload,
+        "pallet": pallet,
+        "grid_mm": grid,
+        "visualization_unit": config.get("visualization_unit", "mm"),
+    }, items
 
 
 def allowed_orientations(item: ExactItem, mode: str) -> list[tuple[int, int, int]]:
@@ -162,24 +199,43 @@ def subset_sum_coordinates(limit: int, dimensions: Iterable[int]) -> list[int]:
 
 
 def generate_placements(
-    items: list[ExactItem], pallet: dict[str, int], max_pallets: int, rotation_mode: str
+    items: list[ExactItem], pallet: dict[str, int], max_pallets: int,
+    rotation_mode: str, placement_domain: str = "full_grid",
 ) -> tuple[list[Placement], dict[int, list[int]]]:
+    """Enumerate every boundary-feasible placement on the integer grid.
+
+    Coordinates are grid-cell indices.  For an oriented extent ``d`` within
+    an axis of length ``limit``, the complete coordinate domain is
+    ``range(limit - d + 1)``.  This deliberately does not apply the former
+    subset-sum/normal-pattern restriction: the full enumeration is exact with
+    respect to the discretized grid, including support- and overlap-dependent
+    side constraints.
+    """
     orientations = {item.index: allowed_orientations(item, rotation_mode) for item in items}
-    x_dims = [dims[0] for item in items for dims in orientations[item.index]]
-    y_dims = [dims[1] for item in items for dims in orientations[item.index]]
-    z_dims = [dims[2] for item in items for dims in orientations[item.index]]
-    xs = subset_sum_coordinates(pallet["length"], x_dims)
-    ys = subset_sum_coordinates(pallet["width"], y_dims)
-    zs = subset_sum_coordinates(pallet["height"], z_dims)
+    if placement_domain not in {"full_grid", "subset_sum"}:
+        raise ValueError("placement_domain must be 'full_grid' or 'subset_sum'")
+    axis_coordinates: tuple[list[int], list[int], list[int]] | None = None
+    if placement_domain == "subset_sum":
+        axis_coordinates = (
+            subset_sum_coordinates(pallet["length"], [d[0] for i in items for d in orientations[i.index]]),
+            subset_sum_coordinates(pallet["width"], [d[1] for i in items for d in orientations[i.index]]),
+            subset_sum_coordinates(pallet["height"], [d[2] for i in items for d in orientations[i.index]]),
+        )
 
     placements: list[Placement] = []
     by_item: dict[int, list[int]] = defaultdict(list)
     for item in items:
         for pallet_index in range(max_pallets):
             for orientation, (dx, dy, dz) in enumerate(orientations[item.index]):
-                x_values = sorted(set([x for x in xs if x + dx <= pallet["length"]] + [pallet["length"] - dx]))
-                y_values = sorted(set([y for y in ys if y + dy <= pallet["width"]] + [pallet["width"] - dy]))
-                z_values = [z for z in zs if z + dz <= pallet["height"]]
+                if axis_coordinates is None:
+                    x_values = range(pallet["length"] - dx + 1)
+                    y_values = range(pallet["width"] - dy + 1)
+                    z_values = range(pallet["height"] - dz + 1)
+                else:
+                    xs, ys, zs = axis_coordinates
+                    x_values = sorted(set([x for x in xs if x + dx <= pallet["length"]] + [pallet["length"] - dx]))
+                    y_values = sorted(set([y for y in ys if y + dy <= pallet["width"]] + [pallet["width"] - dy]))
+                    z_values = [z for z in zs if z + dz <= pallet["height"]]
                 for x in x_values:
                     for y in y_values:
                         for z in z_values:
@@ -233,7 +289,8 @@ class PositionIndexedMILP:
         self.pallet = context["pallet"]
         self.max_pallets = int(config["max_pallets"])
         self.placements, self.by_item = generate_placements(
-            items, self.pallet, self.max_pallets, config["rotation_mode"]
+            items, self.pallet, self.max_pallets, config["rotation_mode"],
+            config.get("placement_domain", "full_grid"),
         )
         self.by_pallet: dict[int, list[int]] = defaultdict(list)
         self.by_pallet_top: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -273,6 +330,84 @@ class PositionIndexedMILP:
         self._build_optional_constraints()
         self._build_objectives()
         self.model.update()
+
+    def greedy_selection(self, exact_pallet_count: int) -> list[Placement] | None:
+        """Build a conservative feasible placement for use as a MIP start."""
+        selected: list[Placement] = []
+        item_order = sorted(
+            self.items,
+            key=lambda item: (
+                -max(item.dims[0] * item.dims[1], item.dims[0] * item.dims[2], item.dims[1] * item.dims[2]),
+                -max(item.dims),
+                item.index,
+            ),
+        )
+        support_mode = self.config["support"]["mode"]
+        required_support = {
+            "direct": 1e-9,
+            "fraction": float(self.config["support"]["minimum_fraction"]),
+            "full": 1.0,
+        }.get(support_mode, 0.0)
+
+        def overlaps_3d(a: Placement, b: Placement) -> bool:
+            return (
+                a.pallet == b.pallet
+                and overlap_1d(a.x, a.x + a.dx, b.x, b.x + b.dx) > 0
+                and overlap_1d(a.y, a.y + a.dy, b.y, b.y + b.dy) > 0
+                and overlap_1d(a.z, a.z + a.dz, b.z, b.z + b.dz) > 0
+            )
+
+        for item in item_order:
+            candidates = [
+                self.placements[qid]
+                for qid in self.by_item[item.index]
+                if self.placements[qid].pallet < exact_pallet_count
+            ]
+            candidates.sort(key=lambda q: (q.z, q.pallet, q.y, q.x, q.orientation))
+            chosen = None
+            for candidate in candidates:
+                if any(overlaps_3d(candidate, other) for other in selected):
+                    continue
+                if candidate.z > 0 and support_mode != "off":
+                    if support_fraction(candidate, selected) + 1e-12 < required_support:
+                        continue
+                if candidate.z > 0 and self.config["fragile"]["cannot_support"]:
+                    if any(
+                        lower.pallet == candidate.pallet
+                        and lower.top == candidate.z
+                        and footprint_overlap(candidate, lower) > 0
+                        and self.items[lower.item].fragile
+                        for lower in selected
+                    ):
+                        continue
+                chosen = candidate
+                break
+            if chosen is None:
+                return None
+            selected.append(chosen)
+        return selected
+
+    def apply_greedy_start(self, exact_pallet_count: int) -> bool:
+        if not self.config.get("warm_start", {}).get("greedy", False):
+            return False
+        selected = self.greedy_selection(exact_pallet_count)
+        if selected is None:
+            return False
+        selected_ids = {q.id for q in selected}
+        for q in self.placements:
+            self.x[q.id].Start = 1.0 if q.id in selected_ids else 0.0
+        for pallet in range(self.max_pallets):
+            self.y[pallet].Start = 1.0 if pallet < exact_pallet_count else 0.0
+            tops = [q.top for q in selected if q.pallet == pallet]
+            self.height[pallet].Start = max(tops, default=0)
+        used_heights = [max((q.top for q in selected if q.pallet == p), default=0)
+                        for p in range(exact_pallet_count)]
+        self.max_height.Start = max(used_heights, default=0)
+        self.min_height.Start = min(used_heights, default=0)
+        self.spread.Start = self.max_height.Start - self.min_height.Start
+        for variable in self.access_vars.values():
+            variable.Start = 0.0
+        return True
 
     def dump_model(self, lp_path: str | Path | None = None, print_stats: bool = False) -> None:
         """Export the instantiated MILP and optionally print Gurobi statistics.
@@ -492,6 +627,13 @@ class PositionIndexedMILP:
         if self.model.SolCount == 0:
             raise RuntimeError(f"no feasible solution for {name}; status={self.model.Status}")
 
+    def optimize_feasibility(self, name: str) -> None:
+        self.model.setObjective(0.0, GRB.MINIMIZE)
+        self.model.ModelName = name
+        self.model.optimize()
+        if self.model.SolCount == 0:
+            raise RuntimeError(f"no feasible solution for {name}; status={self.model.Status}")
+
     def value(self, expression) -> float:
         return float(expression.getValue()) if hasattr(expression, "getValue") else float(expression.X)
 
@@ -563,9 +705,25 @@ def solve_pareto(
     lower_bound = max(1, math.ceil(total_volume / pallet_volume))
     all_solutions: list[ExactSolution] = []
 
+    if config.get("objective_mode") == "pallet_count_only":
+        for pallet_count in range(lower_bound, int(config["max_pallets"]) + 1):
+            started = time.perf_counter()
+            exact = PositionIndexedMILP(context, items, config, pallet_count)
+            exact.apply_greedy_start(pallet_count)
+            try:
+                exact.optimize_feasibility(f"feasibility_{pallet_count}_pallets")
+            except RuntimeError:
+                exact.model.dispose()
+                continue
+            solution = exact.extract(started)
+            exact.model.dispose()
+            return [solution]
+        return []
+
     for pallet_count in range(lower_bound, int(config["max_pallets"]) + 1):
         started = time.perf_counter()
         exact = PositionIndexedMILP(context, items, config, pallet_count)
+        exact.apply_greedy_start(pallet_count)
         if model_dump is not None or print_model:
             dump_path = None
             if model_dump is not None:
@@ -579,7 +737,15 @@ def solve_pareto(
             # Pareto stages replace this objective and add their own bounds.
             exact.model.setObjective(exact.spread, GRB.MINIMIZE)
             exact.dump_model(dump_path, print_stats=print_model)
-        exact.optimize_expression(exact.spread, f"spread_{pallet_count}_pallets")
+        try:
+            exact.optimize_expression(exact.spread, f"spread_{pallet_count}_pallets")
+        except RuntimeError:
+            # An exact pallet count may be infeasible, or Gurobi may hit its
+            # time limit before finding an incumbent. Continue with larger
+            # pallet counts so a feasible non-optimal packing can still be
+            # returned when the user allows multiple pallets.
+            exact.model.dispose()
+            continue
         optimal_spread = int(math.ceil(exact.spread.X - 1e-8))
         spread_constraint = exact.model.addConstr(exact.spread <= optimal_spread, name="fix_optimal_spread")
 
@@ -653,29 +819,43 @@ def render_solution(
 ) -> None:
     grid = context["grid_mm"]
     pallet = context["pallet"]
+    visualization_unit = context.get("visualization_unit", "mm")
+    if visualization_unit == "mm":
+        scale = 1.0
+    elif visualization_unit == "cm":
+        scale = 0.1
+    else:
+        raise ValueError("visualization_unit must be 'mm' or 'cm'")
     rows = solution_rows(solution, items, grid)
     positions = [
-        ((row["pallet"] - 1) * pallet["length_mm"] + row["x_mm"], row["y_mm"], row["z_mm"])
+        (
+            ((row["pallet"] - 1) * pallet["length_mm"] + row["x_mm"]) * scale,
+            row["y_mm"] * scale,
+            row["z_mm"] * scale,
+        )
         for row in rows
     ]
-    sizes = [(row["length_mm"], row["width_mm"], row["height_mm"]) for row in rows]
+    sizes = [
+        (row["length_mm"] * scale, row["width_mm"] * scale, row["height_mm"] * scale)
+        for row in rows
+    ]
     case_ids = np.array([row["sku"] for row in rows])
     figure = _plot_cuboids(
         positions,
         sizes,
-        pallet["length_mm"] * solution.pallet_count,
-        pallet["width_mm"],
-        pallet["height_mm"],
+        pallet["length_mm"] * solution.pallet_count * scale,
+        pallet["width_mm"] * scale,
+        pallet["height_mm"] * scale,
         True,
         case_ids,
     )
     for p in range(solution.pallet_count):
-        left = p * pallet["length_mm"]
-        right = (p + 1) * pallet["length_mm"]
+        left = p * pallet["length_mm"] * scale
+        right = (p + 1) * pallet["length_mm"] * scale
         figure.add_trace(
             go.Scatter3d(
                 x=[left, right, right, left, left],
-                y=[0, 0, pallet["width_mm"], pallet["width_mm"], 0],
+                y=[0, 0, pallet["width_mm"] * scale, pallet["width_mm"] * scale, 0],
                 z=[0, 0, 0, 0, 0],
                 mode="lines",
                 name=f"Pallet {p + 1}",
@@ -685,11 +865,16 @@ def render_solution(
     figure.update_layout(
         title=(
             f"Exact Pareto solution: pallets={solution.pallet_count}, "
-            f"spread={solution.height_spread * grid} mm, "
+            f"spread={solution.height_spread * grid * scale:g} {visualization_unit}, "
             f"access={solution.accessibility}, {solution.vertical_moment_mode} moment="
             f"{solution.vertical_moment:.1f}"
         ),
-        scene={"aspectmode": "data"},
+        scene={
+            "aspectmode": "data",
+            "xaxis_title": f"x ({visualization_unit})",
+            "yaxis_title": f"y ({visualization_unit})",
+            "zaxis_title": f"z ({visualization_unit})",
+        },
     )
     figure.write_html(path)
 
@@ -702,6 +887,12 @@ def write_outputs(
     render_all: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    if not solutions:
+        (output_dir / "NO_FEASIBLE_SOLUTION.txt").write_text(
+            "No feasible incumbent was found within the configured limits.\n",
+            encoding="utf-8",
+        )
+        return
     summary_path = output_dir / "pareto_front.csv"
     with summary_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -780,6 +971,10 @@ def main() -> int:
     parser.add_argument("--time-limit", type=float, default=None)
     parser.add_argument("--max-pallets", type=int, default=None)
     parser.add_argument(
+        "--placement-domain", choices=("full_grid", "subset_sum"), default=None,
+        help="override placement enumeration for controlled formulation comparisons",
+    )
+    parser.add_argument(
         "--write-lp",
         default=None,
         metavar="PATH",
@@ -797,6 +992,8 @@ def main() -> int:
         config["time_limit_seconds"] = args.time_limit
     if args.max_pallets is not None:
         config["max_pallets"] = args.max_pallets
+    if args.placement_domain is not None:
+        config["placement_domain"] = args.placement_domain
     context, items = read_mcpp_json(args.input, config)
     solutions = solve_pareto(
         context,

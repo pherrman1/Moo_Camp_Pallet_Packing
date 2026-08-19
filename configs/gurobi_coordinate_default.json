@@ -5,6 +5,9 @@
   "time_limit_seconds": 300,
   "mip_gap": 0.0,
   "log_to_console": false,
+  "model_variant": "reduced_exact",
+  "area_auxiliary_type": "integer",
+  "stacking_mass_alpha": 1.2,
   "rotation_mode": "yaw",
   "support": {
     "mode": "fraction",

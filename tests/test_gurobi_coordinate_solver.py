@@ -5,6 +5,8 @@ from gurobi_coordinate_solver import (
     CoordinateItem,
     CoordinatePlacement,
     CoordinateSolution,
+    CoordinateBasedMILP,
+    ReducedExactCoordinateMILP,
     allowed_orientations,
     audit_solution,
     footprint_overlap,
@@ -64,6 +66,161 @@ class TestCoordinateGeometry(unittest.TestCase):
             "meta": {"bounds": {"ub_pallets_heuristic": 3}}
         }
         self.assertEqual(recommended_max_pallets(payload), 3)
+
+    def test_both_payload_capacity_field_names_are_supported(self):
+        root = Path(__file__).resolve().parents[1]
+        config = {"grid_mm": "input", "max_items": 100, "stacking_mass_alpha": 1.2}
+        pl_context, _ = read_mcpp_json(
+            root / "tests" / "instances" / "pl001_n010_H900_B2_LB2UB2.json", config
+        )
+        mcpp_context, _ = read_mcpp_json(root / "input" / "gurobi_small_exact.json", config)
+        self.assertEqual(pl_context["pallet"]["payload_kg"], 500.0)
+        self.assertEqual(mcpp_context["pallet"]["payload_kg"], 1000.0)
+
+
+class TestReducedExactCoordinateMILP(unittest.TestCase):
+    @staticmethod
+    def _item(index, dims, weight_kg=1.0):
+        return CoordinateItem(
+            index, index + 1, index + 1, tuple(value * 50 for value in dims), dims,
+            weight_kg, 1.0, "test", False, False, False, True, 1,
+        )
+
+    def _solve(self, model_class, support_mode):
+        context = {
+            "pallet": {
+                "length": 4, "width": 2, "height": 2,
+                "length_mm": 200, "width_mm": 100, "height_mm": 100,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [
+            self._item(0, (2, 2, 1)),
+            self._item(1, (2, 2, 1)),
+            self._item(2, (4, 2, 1)),
+        ]
+        config = {
+            "max_pallets": 2,
+            "time_limit_seconds": 10,
+            "mip_gap": 0.0,
+            "log_to_console": False,
+            "rotation_mode": "yaw",
+            "area_auxiliary_type": "integer",
+            "stacking_mass_alpha": 1.2,
+            "support": {"mode": support_mode, "minimum_fraction": 0.75},
+            "symmetry": {
+                "fix_first_item": False,
+                "order_pallet_loads": False,
+                "order_identical_items": False,
+            },
+        }
+        exact = model_class(context, items, config)
+        try:
+            solution = exact.solve()
+            audit_solution(solution, context, support_mode, 0.75)
+            return solution, exact.model.NumVars, exact.model.NumConstrs, exact.model.NumGenConstrs
+        finally:
+            exact.model.dispose()
+
+    def test_reduced_matches_legacy_for_all_support_modes(self):
+        for support_mode in ("off", "direct", "fraction", "full"):
+            with self.subTest(support_mode=support_mode):
+                legacy, *_ = self._solve(CoordinateBasedMILP, support_mode)
+                reduced, *_ = self._solve(ReducedExactCoordinateMILP, support_mode)
+                self.assertEqual(legacy.pallet_count, reduced.pallet_count)
+                self.assertEqual(legacy.objective_bound, reduced.objective_bound)
+
+    def test_reduced_fraction_model_is_strictly_smaller(self):
+        _, legacy_vars, legacy_rows, legacy_general = self._solve(CoordinateBasedMILP, "fraction")
+        _, reduced_vars, reduced_rows, reduced_general = self._solve(ReducedExactCoordinateMILP, "fraction")
+        self.assertLess(reduced_vars, legacy_vars)
+        self.assertLess(reduced_rows, legacy_rows)
+        self.assertLess(reduced_general, legacy_general)
+
+    def test_payload_capacity_can_force_two_pallets(self):
+        context = {
+            "pallet": {
+                "length": 2, "width": 1, "height": 1,
+                "length_mm": 100, "width_mm": 50, "height_mm": 50,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [self._item(0, (1, 1, 1), 600.0), self._item(1, (1, 1, 1), 600.0)]
+        config = {
+            "max_pallets": 2, "time_limit_seconds": 10, "mip_gap": 0.0,
+            "log_to_console": False, "rotation_mode": "none",
+            "area_auxiliary_type": "integer", "stacking_mass_alpha": 1.2,
+            "support": {"mode": "off", "minimum_fraction": 0.75},
+            "symmetry": {"fix_first_item": False, "order_pallet_loads": False, "order_identical_items": False},
+        }
+        exact = ReducedExactCoordinateMILP(context, items, config)
+        try:
+            solution = exact.solve()
+            self.assertEqual(solution.pallet_count, 2)
+            self.assertEqual(
+                len([c for c in exact.model.getConstrs() if c.ConstrName.startswith("payload_capacity")]),
+                2,
+            )
+            audit_solution(solution, context, "off", 0.75, items, 1.2)
+        finally:
+            exact.model.dispose()
+
+    def test_heavier_box_is_forced_below_lighter_box(self):
+        context = {
+            "pallet": {
+                "length": 1, "width": 1, "height": 2,
+                "length_mm": 50, "width_mm": 50, "height_mm": 100,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [self._item(0, (1, 1, 1), 10.0), self._item(1, (1, 1, 1), 5.0)]
+        config = {
+            "max_pallets": 1, "time_limit_seconds": 10, "mip_gap": 0.0,
+            "log_to_console": False, "rotation_mode": "none",
+            "area_auxiliary_type": "integer", "stacking_mass_alpha": 1.2,
+            "support": {"mode": "full", "minimum_fraction": 0.75},
+            "symmetry": {"fix_first_item": False, "order_pallet_loads": False, "order_identical_items": False},
+        }
+        exact = ReducedExactCoordinateMILP(context, items, config)
+        try:
+            solution = exact.solve()
+            by_item = {placement.item: placement for placement in solution.placements}
+            self.assertLess(by_item[0].z, by_item[1].z)
+            self.assertEqual(
+                len([c for c in exact.model.getConstrs() if c.ConstrName.startswith("mass_above_ratio")]),
+                1,
+            )
+            audit_solution(solution, context, "full", 0.75, items, 1.2)
+        finally:
+            exact.model.dispose()
+
+    def test_mass_order_rule_is_inactive_across_pallets(self):
+        context = {
+            "pallet": {
+                "length": 1, "width": 1, "height": 1,
+                "length_mm": 50, "width_mm": 50, "height_mm": 50,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [self._item(0, (1, 1, 1), 10.0), self._item(1, (1, 1, 1), 5.0)]
+        config = {
+            "max_pallets": 2, "time_limit_seconds": 10, "mip_gap": 0.0,
+            "log_to_console": False, "rotation_mode": "none",
+            "area_auxiliary_type": "integer", "stacking_mass_alpha": 1.2,
+            "support": {"mode": "off", "minimum_fraction": 0.75},
+            "symmetry": {"fix_first_item": False, "order_pallet_loads": False, "order_identical_items": False},
+        }
+        exact = ReducedExactCoordinateMILP(context, items, config)
+        try:
+            solution = exact.solve()
+            self.assertEqual(solution.pallet_count, 2)
+            audit_solution(solution, context, "off", 0.75, items, 1.2)
+        finally:
+            exact.model.dispose()
 
 
 if __name__ == "__main__":

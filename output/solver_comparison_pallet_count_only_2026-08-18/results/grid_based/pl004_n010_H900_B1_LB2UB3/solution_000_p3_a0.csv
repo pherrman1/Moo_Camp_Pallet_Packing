@@ -1,0 +1,11 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,weight_kg,density_kg_m3,family,is_food,is_chemical,fragile,retrieval_priority,support_fraction
+0,1,1,1,1,300,350,0,200,300,400,10.58,537.7245813321135,chilled_food,True,False,False,1,1.0
+1,2,2,2,1,700,250,0,350,550,550,21.43,224.90801125904406,dry_food,True,False,False,3,1.0
+2,3,2,3,1,850,200,0,350,550,550,22.46,235.71786900971208,dry_food,True,False,False,4,1.0
+3,4,2,3,0,300,350,0,550,350,550,20.57,215.88230478761253,dry_food,True,False,False,4,1.0
+4,5,2,1,0,550,0,0,550,350,550,22.97,241.0703228474215,dry_food,True,False,False,4,1.0
+5,6,2,1,0,0,0,0,550,350,550,19.76,207.38134869242703,dry_food,True,False,False,4,1.0
+6,7,2,2,1,350,0,0,350,550,550,21.06,221.02485847482353,dry_food,True,False,False,4,1.0
+7,8,2,3,0,200,0,0,550,350,550,20.82,218.50605666884263,dry_food,True,False,False,4,1.0
+8,9,2,2,1,0,0,0,350,550,550,20.29,212.94370268063483,dry_food,True,False,False,4,1.0
+9,10,2,1,0,550,450,0,550,350,550,19.07,200.13979350023195,dry_food,True,False,False,4,1.0

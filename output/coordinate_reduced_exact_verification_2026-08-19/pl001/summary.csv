@@ -1,0 +1,2 @@
+status,pallet_count,volume_utilization,objective_bound,mip_gap,runtime_seconds
+OPTIMAL,2,0.5115017361111112,2.0,0.0,18.74740059999749

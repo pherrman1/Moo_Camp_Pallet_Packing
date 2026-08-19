@@ -1,0 +1,3 @@
+solution,pallet_count,height_spread_mm,accessibility_inversions,vertical_moment_mode,vertical_moment,density_vertical_moment,mass_vertical_moment,mip_gap,runtime_seconds
+0,1,0,0,mass,10.447000000000003,1313.7696416518945,10.447000000000003,0.022207332248492494,1.9747458000201732
+1,2,0,0,mass,7.178999999999999,901.2433054567965,7.178999999999999,0.020894274968658758,2.5045762999216095

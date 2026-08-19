@@ -1,0 +1,9 @@
+instance,n_boxes,variant,overlap_formulation,area_auxiliary_type,variables,binary_variables,integer_variables,continuous_variables,linear_constraints,general_constraints,quadratic_constraints,nonzeros,build_seconds,gurobi_runtime_seconds,total_wall_seconds,status,solution_count,pallet_count,objective_bound,mip_gap
+pl001_n010_H900_B2_LB2UB2,10,compact_continuous,compact,continuous,4653,2283,1290,1080,11076,810,0,30585,0.816868,30.181,31.008648,TIME_LIMIT,0,,2.0,
+pl001_n010_H900_B2_LB2UB2,10,lookup_1d,lookup_1d,continuous,28251,26691,480,1080,12426,0,0,176223,1.603799,30.412,32.163212,TIME_LIMIT,0,,2.0,
+pl001_n010_H900_B2_LB2UB2,10,lookup_2d,lookup_2d,continuous,279681,279066,210,405,9321,0,0,2195628,3.615477,30.099,34.158559,TIME_LIMIT,0,,2.0,
+pl001_n010_H900_B2_LB2UB2,10,compact_integer_area,compact,integer,4653,2283,2370,0,11076,810,0,30585,0.756073,6.551,7.326617,OPTIMAL,1,2,2.0,0.0
+pl002_n010_H900_2_LB2UB3,10,compact_continuous,compact,continuous,4653,2283,1290,1080,11076,810,0,30585,0.863253,30.022,30.922206,TIME_LIMIT,1,3,2.0,0.3333333333333333
+pl002_n010_H900_2_LB2UB3,10,lookup_1d,lookup_1d,continuous,21231,19671,480,1080,12426,0,0,134103,1.199883,30.1,31.414424,TIME_LIMIT,1,3,2.0,0.3333333333333333
+pl002_n010_H900_2_LB2UB3,10,lookup_2d,lookup_2d,continuous,140031,139416,210,405,9321,0,0,1092468,1.838331,30.085,32.127386,TIME_LIMIT,1,3,2.0,0.3333333333333333
+pl002_n010_H900_2_LB2UB3,10,compact_integer_area,compact,integer,4653,2283,2370,0,11076,810,0,30585,0.29901,30.041,30.349489,TIME_LIMIT,1,3,2.0,0.3333333333333333
