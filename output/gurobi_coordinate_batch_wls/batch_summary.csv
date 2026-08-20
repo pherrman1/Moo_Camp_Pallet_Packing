@@ -1,0 +1,6 @@
+instance,input_file,status,n_boxes,max_pallets,pallet_count,objective_bound,mip_gap,runtime_seconds,variables,linear_constraints,general_constraints,output_directory,error_type,error
+pl001_n010_H900_B2_LB2UB2,tests/instances/pl001_n010_H900_B2_LB2UB2.json,OPTIMAL,10,2,2,2.0,0.0,4.6002349853515625,3102,7390,540,output/gurobi_coordinate_batch_wls/pl001_n010_H900_B2_LB2UB2,,
+pl002_n010_H900_2_LB2UB3,tests/instances/pl002_n010_H900_2_LB2UB3.json,INTERRUPTED,10,3,3,2.0,0.3333333333333333,26.199368000030518,4653,11079,810,output/gurobi_coordinate_batch_wls/pl002_n010_H900_2_LB2UB3,,
+pl003_n010_H450_2_LB3UB3,tests/instances/pl003_n010_H450_2_LB3UB3.json,ERROR,,3,,,,2.741912018012954,,,,output/gurobi_coordinate_batch_wls/pl003_n010_H450_2_LB3UB3,RuntimeError,no feasible solution found; Gurobi status=INTERRUPTED (11)
+pl004_n010_H900_B1_LB2UB3,tests/instances/pl004_n010_H900_B1_LB2UB3.json,ERROR,,3,,,,0.26777185397804715,,,,output/gurobi_coordinate_batch_wls/pl004_n010_H900_B1_LB2UB3,RuntimeError,no feasible solution found; Gurobi status=INTERRUPTED (11)
+pl005_n012_H1200_2_LB2UB2,tests/instances/pl005_n012_H1200_2_LB2UB2.json,ERROR,,2,,,,0.1444337480061222,,,,output/gurobi_coordinate_batch_wls/pl005_n012_H1200_2_LB2UB2,RuntimeError,no feasible solution found; Gurobi status=INTERRUPTED (11)

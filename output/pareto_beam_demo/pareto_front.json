@@ -1,0 +1,298 @@
+[
+  {
+    "solution": "solution_000_p2",
+    "pallets": 2.0,
+    "height": 0.1111111111111111,
+    "accessibility": 0.0,
+    "category_distance": 0.5150462962962963,
+    "recommended": false
+  },
+  {
+    "solution": "solution_001_p2",
+    "pallets": 2.0,
+    "height": 0.1388888888888889,
+    "accessibility": 0.0,
+    "category_distance": 0.3567708333333333,
+    "recommended": false
+  },
+  {
+    "solution": "solution_002_p2",
+    "pallets": 2.0,
+    "height": 0.18055555555555555,
+    "accessibility": 0.0,
+    "category_distance": 0.3023726851851852,
+    "recommended": true
+  },
+  {
+    "solution": "solution_003_p2",
+    "pallets": 2.0,
+    "height": 0.19444444444444445,
+    "accessibility": 0.0,
+    "category_distance": 0.2971643518518518,
+    "recommended": false
+  },
+  {
+    "solution": "solution_004_p2",
+    "pallets": 2.0,
+    "height": 0.19444444444444445,
+    "accessibility": 0.0,
+    "category_distance": 0.2971643518518518,
+    "recommended": false
+  },
+  {
+    "solution": "solution_005_p2",
+    "pallets": 2.0,
+    "height": 0.19444444444444445,
+    "accessibility": 0.0,
+    "category_distance": 0.2971643518518518,
+    "recommended": false
+  },
+  {
+    "solution": "solution_006_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_007_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_008_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_009_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_010_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_011_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_012_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_013_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_014_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_015_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_016_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_017_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_018_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_019_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_020_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_021_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_022_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_023_p2",
+    "pallets": 2.0,
+    "height": 0.2222222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_024_p2",
+    "pallets": 2.0,
+    "height": 0.3472222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.25896990740740744,
+    "recommended": false
+  },
+  {
+    "solution": "solution_025_p2",
+    "pallets": 2.0,
+    "height": 0.3472222222222222,
+    "accessibility": 0.0,
+    "category_distance": 0.25896990740740744,
+    "recommended": false
+  },
+  {
+    "solution": "solution_026_p3",
+    "pallets": 3.0,
+    "height": 0.10185185185185185,
+    "accessibility": 0.0,
+    "category_distance": 0.4933449074074074,
+    "recommended": false
+  },
+  {
+    "solution": "solution_027_p3",
+    "pallets": 3.0,
+    "height": 0.12037037037037036,
+    "accessibility": 0.0,
+    "category_distance": 0.3532986111111111,
+    "recommended": false
+  },
+  {
+    "solution": "solution_028_p3",
+    "pallets": 3.0,
+    "height": 0.12037037037037036,
+    "accessibility": 0.0,
+    "category_distance": 0.35329861111111116,
+    "recommended": false
+  },
+  {
+    "solution": "solution_029_p3",
+    "pallets": 3.0,
+    "height": 0.14814814814814814,
+    "accessibility": 0.0,
+    "category_distance": 0.30526620370370366,
+    "recommended": false
+  },
+  {
+    "solution": "solution_030_p3",
+    "pallets": 3.0,
+    "height": 0.14814814814814814,
+    "accessibility": 1.0,
+    "category_distance": 0.30179398148148145,
+    "recommended": false
+  },
+  {
+    "solution": "solution_031_p3",
+    "pallets": 3.0,
+    "height": 0.1574074074074074,
+    "accessibility": 0.0,
+    "category_distance": 0.2971643518518518,
+    "recommended": false
+  },
+  {
+    "solution": "solution_032_p3",
+    "pallets": 3.0,
+    "height": 0.1574074074074074,
+    "accessibility": 0.0,
+    "category_distance": 0.2971643518518518,
+    "recommended": false
+  },
+  {
+    "solution": "solution_033_p3",
+    "pallets": 3.0,
+    "height": 0.17592592592592593,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_034_p3",
+    "pallets": 3.0,
+    "height": 0.17592592592592593,
+    "accessibility": 0.0,
+    "category_distance": 0.26070601851851855,
+    "recommended": false
+  },
+  {
+    "solution": "solution_035_p3",
+    "pallets": 3.0,
+    "height": 0.25925925925925924,
+    "accessibility": 0.0,
+    "category_distance": 0.25896990740740744,
+    "recommended": false
+  },
+  {
+    "solution": "solution_036_p3",
+    "pallets": 3.0,
+    "height": 0.25925925925925924,
+    "accessibility": 0.0,
+    "category_distance": 0.25896990740740744,
+    "recommended": false
+  }
+]

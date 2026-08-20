@@ -1,0 +1,6 @@
+{
+  "instance": "pl005_n012_H1200_2_LB2UB2",
+  "input_file": "tests/instances/pl005_n012_H1200_2_LB2UB2.json",
+  "error_type": "RuntimeError",
+  "error": "no feasible solution found; Gurobi status=INTERRUPTED (11)"
+}

@@ -1,0 +1,21 @@
+{
+  "algorithm": "fixed-order Pareto beam search",
+  "archive_size": 37,
+  "levels_completed": 12,
+  "states_generated_estimate": 204014,
+  "feasible_children_after_local_filtering": 9165,
+  "runtime_seconds": 5.760895345010795,
+  "recommended_objectives": {
+    "pallets": 2.0,
+    "height": 0.18055555555555555,
+    "accessibility": 0.0,
+    "category_distance": 0.3023726851851852
+  },
+  "output_files": {
+    "front": "pareto_front.csv",
+    "front_plot": "pareto_front.png",
+    "recommended_json": "recommended_solution.json",
+    "recommended_csv": "recommended_solution.csv",
+    "recommended_visualization": "recommended_solution.html"
+  }
+}
