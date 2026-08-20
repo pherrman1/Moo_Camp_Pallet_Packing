@@ -1,0 +1,11 @@
+box_index,box_id,sku,pallet,orientation,x_mm,y_mm,z_mm,length_mm,width_mm,height_mm,original_length_mm,original_width_mm,original_height_mm,weight_kg,family,is_food,is_chemical,class_label,fragile,retrieval_priority,support_fraction
+0,1,1,1,0,550,100,1050,350,250,200,308,216,159,1.64,snacks_bakery,True,False,F,True,2,0.8571428571428571
+1,2,1,1,0,550,100,1250,350,250,200,308,216,159,1.64,snacks_bakery,True,False,F,True,2,1.0
+2,3,2,1,1,900,0,600,300,450,200,422,255,188,9.43,dry_food,True,False,F,False,4,0.8333333333333334
+3,4,3,1,1,600,50,600,300,400,150,388,260,137,8.2,canned_food,True,False,F,False,3,0.8333333333333334
+4,5,4,1,0,900,100,800,300,250,250,287,203,205,4.81,dry_food,True,False,F,False,4,1.0
+5,6,5,1,0,600,100,750,300,250,150,262,227,138,6.43,beverages,True,False,F,False,3,1.0
+6,7,5,1,0,600,100,900,300,250,150,262,227,138,6.43,beverages,True,False,F,False,3,1.0
+7,8,6,1,1,650,0,350,250,500,250,460,249,217,16.99,household_chem,False,True,C,False,5,0.8
+8,9,6,1,1,900,0,350,250,500,250,460,249,217,16.99,household_chem,False,True,C,False,5,0.8
+9,10,7,1,0,500,50,0,650,400,350,606,387,347,25.0,household_chem,False,True,C,False,5,1.0

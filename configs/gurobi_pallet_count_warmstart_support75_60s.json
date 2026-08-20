@@ -1,27 +1,33 @@
 {
-  "grid_mm": 50,
+  "grid_mm": "input",
   "max_items": 100,
-  "max_pallets": 2,
-  "time_limit_seconds": 300,
-  "mip_gap": 0.0,
-  "log_to_console": false,
+  "max_pallets": 3,
+  "time_limit_seconds": 60,
+  "pallet_count_time_limit_seconds": 60,
+  "height_time_limit_seconds": 60,
+  "mip_gap": 0.02,
+  "log_to_console": true,
   "model_variant": "reduced_exact",
   "area_auxiliary_type": "integer",
   "stacking_mass_alpha": 1.2,
-  "objective_mode": "pallets_then_max_height",
+  "objective_mode": "pallets_then_average_height",
   "support_area_objective": {
     "enabled": false
+  },
+  "warm_start": {
+    "greedy": true
   },
   "food_chemical": {
     "mode": "chemical_below_food"
   },
+  "visualization_unit": "cm",
   "rotation_mode": "yaw",
   "support": {
     "mode": "fraction",
     "minimum_fraction": 0.75
   },
   "symmetry": {
-    "fix_first_item": true,
+    "fix_first_item": false,
     "order_pallet_loads": true,
     "order_identical_items": true
   }

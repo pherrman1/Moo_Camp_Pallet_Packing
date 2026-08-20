@@ -9,6 +9,15 @@
   "area_auxiliary_type": "integer",
   "stacking_mass_alpha": 1.2,
   "objective_mode": "pallets_then_max_height",
+  "support_area_objective": {
+    "enabled": false
+  },
+  "warm_start": {
+    "greedy": true
+  },
+  "food_chemical": {
+    "mode": "chemical_below_food"
+  },
   "visualization_unit": "cm",
   "rotation_mode": "yaw",
   "support": {

@@ -1,20 +1,25 @@
 {
-  "grid_mm": 50,
+  "grid_mm": "input",
   "max_items": 100,
   "max_pallets": 2,
-  "time_limit_seconds": 300,
+  "fixed_pallet_count": 2,
+  "time_limit_seconds": 60,
   "mip_gap": 0.0,
   "log_to_console": false,
   "model_variant": "reduced_exact",
   "area_auxiliary_type": "integer",
   "stacking_mass_alpha": 1.2,
-  "objective_mode": "pallets_then_max_height",
+  "objective_mode": "category_distance_only",
   "support_area_objective": {
     "enabled": false
+  },
+  "warm_start": {
+    "greedy": false
   },
   "food_chemical": {
     "mode": "chemical_below_food"
   },
+  "visualization_unit": "cm",
   "rotation_mode": "yaw",
   "support": {
     "mode": "fraction",

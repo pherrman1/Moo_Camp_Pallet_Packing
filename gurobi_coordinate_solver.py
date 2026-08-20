@@ -3,9 +3,10 @@
 The default reduced-exact formulation uses pallet-assignment variables plus one
 local orientation and integer-coordinate state per physical box.  A legacy
 pallet-indexed geometry formulation remains selectable for equivalence tests.
-Neither formulation uses position-indexed placement binaries.  The active
-objective is the number of used pallets; project attributes remain available
-for later multi-objective extensions.
+Neither formulation uses position-indexed placement binaries. The active
+lexicographic objectives minimize the number of used pallets and then the
+maximum occupied height; a standalone same-category center-distance objective
+is also selectable.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import json
 import math
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from itertools import permutations
 from pathlib import Path
@@ -32,6 +33,10 @@ from utils import _plot_cuboids
 
 
 DEFAULT_CONFIG = Path(__file__).parent / "configs" / "gurobi_coordinate_default.json"
+CATEGORY_DISTANCE_OBJECTIVE_MODES = {
+    "category_distance_only",
+    "category_distance_then_max_height",
+}
 
 
 @dataclass(frozen=True)
@@ -81,14 +86,77 @@ class CoordinateSolution:
     runtime_seconds: float
     placements: list[CoordinatePlacement]
     max_height_grid: int = 0
+    average_top_height_grid: float = 0.0
     height_objective_bound_grid: float | None = None
     height_mip_gap: float | None = None
     height_stage_attempted: bool = False
+    footprint_depth_lower_bound: int = 0
+    footprint_height_lower_bound_grid: int = 0
+    support_area_grid2: float = 0.0
+    support_area_objective_bound_grid2: float | None = None
+    support_area_mip_gap: float | None = None
+    support_area_stage_attempted: bool = False
+    support_arcs: list[tuple[int, int]] = field(default_factory=list)
+    objective_mode: str = "pallet_count_only"
+    category_distance_grid: float | None = None
+    category_distance_objective_bound_grid: float | None = None
+    category_distance_mip_gap: float | None = None
+    category_distance_stage_attempted: bool = False
+    fixed_pallet_count: int | None = None
+
+
+@dataclass
+class _WarmStartPallet:
+    """Mutable skyline state used only by the coordinate warm-start heuristic."""
+
+    height: np.ndarray
+    supporting_mass: np.ndarray
+    supporting_kind: np.ndarray
+    payload_kg: float
+    placements: list[CoordinatePlacement]
+    max_chemical_top: int = 0
 
 
 def load_config(path: str | Path | None) -> dict[str, Any]:
     config_path = Path(path) if path else DEFAULT_CONFIG
     return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def configured_food_chemical_mode(config: dict[str, Any]) -> str:
+    """Validate the optional pallet-wide chemical/food vertical policy."""
+    mode = str(config.get("food_chemical", {}).get("mode", "off"))
+    if mode not in {"off", "chemical_below_food"}:
+        raise ValueError("food_chemical.mode must be off or chemical_below_food")
+    return mode
+
+
+def configured_support_area_objective(config: dict[str, Any]) -> bool:
+    """Return whether exact support area is the final lexicographic objective."""
+    settings = config.get("support_area_objective", {})
+    if not isinstance(settings, dict):
+        raise ValueError("support_area_objective must be an object")
+    enabled = settings.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("support_area_objective.enabled must be true or false")
+    return enabled
+
+
+def configured_objective_mode(config: dict[str, Any]) -> str:
+    """Validate and return the selected standalone/lexicographic objective mode."""
+    mode = str(config.get("objective_mode", "pallet_count_only"))
+    allowed = {
+        "pallet_count_only",
+        "pallets_then_max_height",
+        "pallets_then_average_height",
+        *CATEGORY_DISTANCE_OBJECTIVE_MODES,
+    }
+    if mode not in allowed:
+        raise ValueError(
+            "objective_mode must be pallet_count_only, pallets_then_max_height, "
+            "pallets_then_average_height, category_distance_only, or "
+            "category_distance_then_max_height"
+        )
+    return mode
 
 
 def snap_up(value_mm: float, grid_mm: int) -> int:
@@ -191,6 +259,8 @@ def read_mcpp_json(path: str | Path, config: dict[str, Any]) -> tuple[dict[str, 
         "grid_mm": grid,
         "visualization_unit": config.get("visualization_unit", "mm"),
         "stacking_mass_alpha": float(config.get("stacking_mass_alpha", 1.2)),
+        "food_chemical_mode": configured_food_chemical_mode(config),
+        "support_area_objective_enabled": configured_support_area_objective(config),
     }, items
 
 
@@ -218,6 +288,38 @@ def allowed_orientations(item: CoordinateItem, mode: str) -> list[tuple[int, int
     return list(dict.fromkeys(candidates))
 
 
+def footprint_height_lower_bound(
+    orientations: dict[int, list[tuple[int, int, int]]],
+    pallet_length: int,
+    pallet_width: int,
+    pallet_count: int,
+) -> tuple[int, int]:
+    """Return a valid (projection depth, height) lower bound in grid units.
+
+    Integrating box-footprint multiplicity over all pallet floors proves that
+    some floor point is covered by at least ``depth`` projected boxes. Their
+    vertical intervals must be disjoint, so their minimum heights add.
+    Minimum orientation footprints and heights keep the cut valid for all
+    rotation modes, even when those two minima use different orientations.
+    """
+    if pallet_count <= 0:
+        raise ValueError("pallet_count must be positive for the footprint-height bound")
+    floor_capacity = pallet_count * pallet_length * pallet_width
+    if floor_capacity <= 0:
+        raise ValueError("pallet floor dimensions must be positive")
+    minimum_footprint_sum = sum(
+        min(dx * dy for dx, dy, _ in item_orientations)
+        for item_orientations in orientations.values()
+    )
+    depth = max(1, math.ceil(minimum_footprint_sum / floor_capacity))
+    minimum_heights = sorted(
+        min(dz for _, _, dz in item_orientations)
+        for item_orientations in orientations.values()
+    )
+    depth = min(depth, len(minimum_heights))
+    return depth, sum(minimum_heights[:depth])
+
+
 def overlap_1d(a0: int, a1: int, b0: int, b1: int) -> int:
     return max(0, min(a1, b1) - max(a0, b0))
 
@@ -239,6 +341,503 @@ def support_fraction(upper: CoordinatePlacement, selected: Iterable[CoordinatePl
     return min(1.0, supported / upper.base_area)
 
 
+def _warm_start_item_groups(items: list[CoordinateItem]) -> list[list[int]]:
+    groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    for item in items:
+        groups[
+            (
+                item.sku, item.dims, item.weight_kg, item.family, item.is_food,
+                item.is_chemical, item.fragile, item.upright_only, item.retrieval_priority,
+            )
+        ].append(item.index)
+    return [indices for indices in groups.values() if len(indices) > 1]
+
+
+def _canonicalize_warm_start(
+    placements: list[CoordinatePlacement],
+    items: list[CoordinateItem],
+    pallet: dict[str, Any],
+    symmetry: dict[str, Any],
+) -> list[CoordinatePlacement] | None:
+    """Relabel equivalent pallets and items to satisfy enabled symmetry rules."""
+    item_volume = {item.index: math.prod(item.dims) for item in items}
+    pallet_indices = sorted({placement.pallet for placement in placements})
+    pallet_volume = {
+        p: sum(item_volume[q.item] for q in placements if q.pallet == p)
+        for p in pallet_indices
+    }
+    if symmetry.get("order_pallet_loads", True):
+        pallet_indices.sort(key=lambda p: (-pallet_volume[p], p))
+    pallet_map = {old: new for new, old in enumerate(pallet_indices)}
+    canonical = [
+        CoordinatePlacement(
+            item=q.item,
+            pallet=pallet_map[q.pallet],
+            orientation=q.orientation,
+            x=q.x,
+            y=q.y,
+            z=q.z,
+            dx=q.dx,
+            dy=q.dy,
+            dz=q.dz,
+        )
+        for q in placements
+    ]
+
+    if symmetry.get("order_identical_items", True):
+        W, H = pallet["width"], pallet["height"]
+
+        def location_key(q: CoordinatePlacement) -> tuple[int, int]:
+            location = q.x * (W + 1) * (H + 1) + q.y * (H + 1) + q.z
+            return q.pallet, location
+
+        by_item = {q.item: q for q in canonical}
+        for indices in _warm_start_item_groups(items):
+            ordered_positions = sorted((by_item[i] for i in indices), key=location_key)
+            for item_index, old in zip(sorted(indices), ordered_positions):
+                by_item[item_index] = CoordinatePlacement(
+                    item=item_index,
+                    pallet=old.pallet,
+                    orientation=old.orientation,
+                    x=old.x,
+                    y=old.y,
+                    z=old.z,
+                    dx=old.dx,
+                    dy=old.dy,
+                    dz=old.dz,
+                )
+        canonical = list(by_item.values())
+
+    if symmetry.get("fix_first_item", True):
+        first = next(q for q in canonical if q.item == 0)
+        if first.pallet != 0:
+            return None
+
+    return sorted(canonical, key=lambda q: q.item)
+
+
+def _warm_start_candidate(
+    state: _WarmStartPallet,
+    item: CoordinateItem,
+    orientation: int,
+    dimensions: tuple[int, int, int],
+    pallet_index: int,
+    pallet_height: int,
+    support_mode: str,
+    minimum_fraction: float,
+) -> tuple[tuple[int, int, int, int, int], CoordinatePlacement] | None:
+    """Return a feasible position, preferring chemical support for food."""
+    dx, dy, dz = dimensions
+    L, W = state.height.shape
+    if dx > L or dy > W or dz > pallet_height:
+        return None
+
+    windows = np.lib.stride_tricks.sliding_window_view(state.height, (dx, dy))
+    base_z = windows.max(axis=(2, 3))
+    ok = base_z + dz <= pallet_height
+    mass_windows = np.lib.stride_tricks.sliding_window_view(
+        state.supporting_mass, (dx, dy)
+    )
+    kind_windows = np.lib.stride_tricks.sliding_window_view(
+        state.supporting_kind, (dx, dy)
+    )
+    contact_cells = windows == base_z[:, :, None, None]
+    # The heuristic deliberately uses a stricter mass rule than the MILP:
+    # every direct supporter must be at least as heavy as the box above it.
+    weight_order_ok = (
+        (~contact_cells) | (item.weight_kg <= mass_windows + 1e-12)
+    ).all(axis=(2, 3))
+    ok &= (base_z == 0) | weight_order_ok
+    supported_cells = (
+        contact_cells & (item.weight_kg <= mass_windows + 1e-12)
+    ).sum(axis=(2, 3))
+    if support_mode == "direct":
+        ok &= (base_z == 0) | (supported_cells > 0)
+    elif support_mode == "fraction":
+        ok &= (base_z == 0) | (supported_cells + 1e-12 >= minimum_fraction * dx * dy)
+    elif support_mode == "full":
+        ok &= (base_z == 0) | (supported_cells == dx * dy)
+
+    # Chemicals are placed in the first phase. Keeping every food base above
+    # the tallest chemical on that pallet satisfies chemical_below_food and
+    # implements the intended chemical-bottom/food-top construction even when
+    # the optional MILP policy is disabled.
+    if item.is_food:
+        ok &= base_z >= state.max_chemical_top
+
+    if not ok.any():
+        return None
+    chemical_support_cells = (
+        contact_cells
+        & (kind_windows == 1)
+        & (item.weight_kg <= mass_windows + 1e-12)
+    ).sum(axis=(2, 3))
+    valid = np.argwhere(ok)
+    x, y = min(
+        ((int(index[0]), int(index[1])) for index in valid),
+        key=lambda point: (
+            -int(chemical_support_cells[point]) if item.is_food else 0,
+            int(base_z[point]),
+            point[1],
+            point[0],
+        ),
+    )
+    z = int(base_z[x, y])
+    placement = CoordinatePlacement(
+        item=item.index,
+        pallet=pallet_index,
+        orientation=orientation,
+        x=x,
+        y=y,
+        z=z,
+        dx=dx,
+        dy=dy,
+        dz=dz,
+    )
+    return (
+        -int(chemical_support_cells[x, y]) if item.is_food else 0,
+        z,
+        y,
+        x,
+        orientation,
+    ), placement
+
+
+def greedy_coordinate_warm_start(
+    context: dict[str, Any],
+    items: list[CoordinateItem],
+    orientations: dict[int, list[tuple[int, int, int]]],
+    config: dict[str, Any],
+    max_pallets: int | None = None,
+) -> list[CoordinatePlacement] | None:
+    """Build a feasible start, opening pallets as needed when no limit is given."""
+    pallet = context["pallet"]
+    L, W, H = pallet["length"], pallet["width"], pallet["height"]
+    payload_limit = float(pallet["payload_kg"])
+    support = config.get("support", {"mode": "fraction", "minimum_fraction": 0.75})
+    support_mode = str(support.get("mode", "fraction"))
+    minimum_fraction = float(support.get("minimum_fraction", 0.75))
+    alpha = float(config.get("stacking_mass_alpha", 1.2))
+    symmetry = config.get("symmetry", {})
+    pallet_limit = len(items) if max_pallets is None else int(max_pallets)
+    if pallet_limit <= 0:
+        return None
+
+    max_base = {
+        i: max(dx * dy for dx, dy, _ in orientations[i]) for i in range(len(items))
+    }
+    max_height = {
+        i: max(dz for _, _, dz in orientations[i]) for i in range(len(items))
+    }
+    volume = {item.index: math.prod(item.dims) for item in items}
+    def phase(item: CoordinateItem) -> int:
+        if item.is_chemical:
+            return 0
+        if item.is_food:
+            return 1
+        return 2
+
+    # All trials preserve the requested category phases and descending weight;
+    # only the geometric tie-break changes to improve the chance of completion.
+    order_keys = (
+        lambda item: (
+            phase(item), -item.weight_kg, -max_base[item.index],
+            -volume[item.index], -max_height[item.index], item.index,
+        ),
+        lambda item: (
+            phase(item), -item.weight_kg, -volume[item.index],
+            -max_base[item.index], -max_height[item.index], item.index,
+        ),
+        lambda item: (
+            phase(item), -item.weight_kg, -max_height[item.index],
+            -max_base[item.index], -volume[item.index], item.index,
+        ),
+    )
+    orderings: list[list[CoordinateItem]] = []
+    seen_orders: set[tuple[int, ...]] = set()
+    for order_key in order_keys:
+        base_order = sorted(items, key=order_key)
+        variants = [base_order]
+        if symmetry.get("fix_first_item", True):
+            # Try a small deterministic set of positions for item zero inside
+            # its category phase. This reserves a chance for it on pallet 0
+            # without abandoning the chemical -> food -> other phase order.
+            anchor = items[0]
+            without_anchor = [item for item in base_order if item.index != 0]
+            phase_start = next(
+                (
+                    index
+                    for index, candidate in enumerate(without_anchor)
+                    if phase(candidate) >= phase(anchor)
+                ),
+                len(without_anchor),
+            )
+            phase_size = sum(phase(item) == phase(anchor) for item in without_anchor)
+            natural_rank = sum(
+                phase(item) == phase(anchor)
+                for item in base_order[: base_order.index(anchor)]
+            )
+            ranks = {
+                0,
+                phase_size // 4,
+                phase_size // 2,
+                (3 * phase_size) // 4,
+                min(natural_rank, phase_size),
+            }
+            variants = []
+            for rank in sorted(ranks):
+                variant = list(without_anchor)
+                variant.insert(phase_start + rank, anchor)
+                variants.append(variant)
+        for variant in variants:
+            signature = tuple(item.index for item in variant)
+            if signature not in seen_orders:
+                seen_orders.add(signature)
+                orderings.append(variant)
+
+    best: tuple[tuple[int, int, int], list[CoordinatePlacement]] | None = None
+
+    for ordered_items in orderings:
+        states = [
+            _WarmStartPallet(
+                np.zeros((L, W), dtype=np.int64),
+                np.full((L, W), np.inf, dtype=float),
+                np.zeros((L, W), dtype=np.int8),
+                0.0,
+                [],
+            )
+            for _ in range(pallet_limit)
+        ]
+        failed = False
+        for item in ordered_items:
+            chosen: tuple[_WarmStartPallet, CoordinatePlacement] | None = None
+            for pallet_index, state in enumerate(states):
+                if state.payload_kg + item.weight_kg > payload_limit + 1e-9:
+                    continue
+                candidates = []
+                for orientation, dimensions in enumerate(orientations[item.index]):
+                    candidate = _warm_start_candidate(
+                        state, item, orientation, dimensions, pallet_index, H,
+                        support_mode, minimum_fraction,
+                    )
+                    if candidate is not None:
+                        candidates.append(candidate)
+                if candidates:
+                    _, placement = min(candidates, key=lambda candidate: candidate[0])
+                    chosen = state, placement
+                    break
+            if chosen is None:
+                failed = True
+                break
+            state, placement = chosen
+            state.height[
+                placement.x : placement.x + placement.dx,
+                placement.y : placement.y + placement.dy,
+            ] = placement.top
+            state.supporting_mass[
+                placement.x : placement.x + placement.dx,
+                placement.y : placement.y + placement.dy,
+            ] = item.weight_kg
+            state.supporting_kind[
+                placement.x : placement.x + placement.dx,
+                placement.y : placement.y + placement.dy,
+            ] = 1 if item.is_chemical else (2 if item.is_food else 0)
+            state.payload_kg += item.weight_kg
+            state.placements.append(placement)
+            if item.is_chemical:
+                state.max_chemical_top = max(state.max_chemical_top, placement.top)
+        if failed:
+            continue
+
+        trial = _canonicalize_warm_start(
+            [q for state in states for q in state.placements], items, pallet, symmetry
+        )
+        if trial is None:
+            continue
+        fixed_pallet_count = config.get("fixed_pallet_count")
+        if (
+            fixed_pallet_count is not None
+            and len({q.pallet for q in trial}) != int(fixed_pallet_count)
+        ):
+            continue
+        support_arcs = [
+            (lower.item, upper.item)
+            for lower in trial
+            for upper in trial
+            if lower.item != upper.item
+            and lower.pallet == upper.pallet
+            and lower.top == upper.z
+            and footprint_overlap(lower, upper) > 0
+            and items[upper.item].weight_kg <= alpha * items[lower.item].weight_kg + 1e-12
+        ]
+        trial_solution = CoordinateSolution(
+            "WARM_START", len({q.pallet for q in trial}), 0.0, 0.0, 0.0, trial,
+            support_arcs=support_arcs,
+        )
+        try:
+            audit_solution(
+                trial_solution,
+                context,
+                support_mode,
+                minimum_fraction,
+                items,
+                alpha,
+                configured_food_chemical_mode(config),
+            )
+        except RuntimeError:
+            continue
+        used = sorted({q.pallet for q in trial})
+        heights = [max(q.top for q in trial if q.pallet == p) for p in used]
+        score = (len(used), max(heights), sum(heights))
+        if best is None or score < best[0]:
+            best = score, trial
+    return None if best is None else best[1]
+
+
+def prepare_unlimited_coordinate_warm_start(
+    context: dict[str, Any],
+    items: list[CoordinateItem],
+    config: dict[str, Any],
+) -> list[CoordinatePlacement] | None:
+    """Prepare the reduced-model warm start without a configured pallet cap."""
+    L, W, H = (
+        context["pallet"]["length"],
+        context["pallet"]["width"],
+        context["pallet"]["height"],
+    )
+    rotation_mode = str(config.get("rotation_mode", "yaw"))
+    orientations: dict[int, list[tuple[int, int, int]]] = {}
+    for item in items:
+        feasible = [
+            dims
+            for dims in allowed_orientations(item, rotation_mode)
+            if dims[0] <= L and dims[1] <= W and dims[2] <= H
+        ]
+        if not feasible:
+            return None
+        orientations[item.index] = feasible
+    return greedy_coordinate_warm_start(
+        context, items, orientations, config, max_pallets=None
+    )
+
+
+def audit_coordinate_warm_start(
+    placements: list[CoordinatePlacement],
+    context: dict[str, Any],
+    items: list[CoordinateItem],
+    config: dict[str, Any],
+) -> None:
+    """Validate every structural value needed for a viable reduced MIP start."""
+    if {placement.item for placement in placements} != set(range(len(items))):
+        raise RuntimeError("warm start does not place every item exactly once")
+    used_pallets = sorted({placement.pallet for placement in placements})
+    if used_pallets != list(range(len(used_pallets))):
+        raise RuntimeError("warm-start pallet indices are not contiguous from zero")
+
+    alpha = float(config.get("stacking_mass_alpha", 1.2))
+    support_arcs = [
+        (lower.item, upper.item)
+        for lower in placements
+        for upper in placements
+        if lower.item != upper.item
+        and lower.pallet == upper.pallet
+        and lower.top == upper.z
+        and footprint_overlap(lower, upper) > 0
+        and items[upper.item].weight_kg
+        <= alpha * items[lower.item].weight_kg + 1e-12
+    ]
+    support_config = config.get(
+        "support", {"mode": "fraction", "minimum_fraction": 0.75}
+    )
+    solution = CoordinateSolution(
+        status="WARM_START_AUDIT",
+        pallet_count=len(used_pallets),
+        objective_bound=0.0,
+        mip_gap=0.0,
+        runtime_seconds=0.0,
+        placements=placements,
+        support_arcs=support_arcs,
+    )
+    audit_solution(
+        solution,
+        context,
+        str(support_config.get("mode", "fraction")),
+        float(support_config.get("minimum_fraction", 0.75)),
+        items,
+        alpha,
+        configured_food_chemical_mode(config),
+    )
+
+    rotation_mode = str(config.get("rotation_mode", "yaw"))
+    L, W, H = (
+        context["pallet"]["length"],
+        context["pallet"]["width"],
+        context["pallet"]["height"],
+    )
+    for placement in placements:
+        allowed = [
+            dimensions
+            for dimensions in allowed_orientations(items[placement.item], rotation_mode)
+            if dimensions[0] <= L and dimensions[1] <= W and dimensions[2] <= H
+        ]
+        if placement.orientation >= len(allowed):
+            raise RuntimeError(f"box {placement.item} has an invalid orientation index")
+        if allowed[placement.orientation] != (placement.dx, placement.dy, placement.dz):
+            raise RuntimeError(f"box {placement.item} dimensions do not match its orientation")
+
+    # The heuristic promises a stricter physical order than the MILP's alpha
+    # rule: every box directly touching another box is no heavier than it.
+    for lower in placements:
+        for upper in placements:
+            if (
+                lower.item != upper.item
+                and lower.pallet == upper.pallet
+                and lower.top == upper.z
+                and footprint_overlap(lower, upper) > 0
+                and items[upper.item].weight_kg > items[lower.item].weight_kg + 1e-9
+            ):
+                raise RuntimeError(
+                    f"warm-start weight order violation: box {upper.item} is heavier "
+                    f"than direct supporter {lower.item}"
+                )
+
+    fixed_pallet_count = config.get("fixed_pallet_count")
+    if fixed_pallet_count is not None and len(used_pallets) != int(fixed_pallet_count):
+        raise RuntimeError("warm-start pallet count differs from fixed_pallet_count")
+
+    symmetry = config.get("symmetry", {})
+    if symmetry.get("fix_first_item", True):
+        first = next(placement for placement in placements if placement.item == 0)
+        if first.pallet != 0:
+            raise RuntimeError("warm start violates fix_first_item")
+    if symmetry.get("order_pallet_loads", True):
+        volumes = [
+            sum(
+                math.prod(items[q.item].dims)
+                for q in placements
+                if q.pallet == pallet
+            )
+            for pallet in used_pallets
+        ]
+        if any(first < second for first, second in zip(volumes, volumes[1:])):
+            raise RuntimeError("warm start violates pallet volume ordering")
+    if symmetry.get("order_identical_items", True):
+        W, H = context["pallet"]["width"], context["pallet"]["height"]
+        by_item = {placement.item: placement for placement in placements}
+        for indices in _warm_start_item_groups(items):
+            keys = [
+                (
+                    by_item[index].pallet,
+                    by_item[index].x * (W + 1) * (H + 1)
+                    + by_item[index].y * (H + 1)
+                    + by_item[index].z,
+                )
+                for index in sorted(indices)
+            ]
+            if keys != sorted(keys):
+                raise RuntimeError("warm start violates identical-item ordering")
+
+
 def audit_solution(
     solution: CoordinateSolution,
     context: dict[str, Any],
@@ -246,6 +845,7 @@ def audit_solution(
     minimum_fraction: float,
     items: list[CoordinateItem] | None = None,
     stacking_mass_alpha: float | None = None,
+    food_chemical_mode: str = "off",
 ) -> None:
     """Fail fast if extracted integer coordinates violate the modeled geometry."""
     pallet = context["pallet"]
@@ -281,16 +881,42 @@ def audit_solution(
                 )
         if stacking_mass_alpha is not None:
             alpha = float(stacking_mass_alpha)
-            for first in solution.placements:
-                for second in solution.placements:
-                    if first.item == second.item or first.pallet != second.pallet or first.z < second.z:
-                        continue
-                    if items[first.item].weight_kg > alpha * items[second.item].weight_kg + 1e-9:
+            placements_by_item = {placement.item: placement for placement in solution.placements}
+            for lower_item, upper_item in solution.support_arcs:
+                lower = placements_by_item[lower_item]
+                upper = placements_by_item[upper_item]
+                if lower.pallet != upper.pallet or lower.top != upper.z:
+                    raise RuntimeError(
+                        f"invalid selected support arc {lower_item}->{upper_item}"
+                    )
+                if footprint_overlap(lower, upper) <= 0:
+                    raise RuntimeError(
+                        f"selected support arc {lower_item}->{upper_item} has no footprint overlap"
+                    )
+                if items[upper_item].weight_kg > alpha * items[lower_item].weight_kg + 1e-9:
+                    raise RuntimeError(
+                        f"mass-incompatible support: box {lower_item} weighing "
+                        f"{items[lower_item].weight_kg:.6f} kg supports box {upper_item} weighing "
+                        f"{items[upper_item].weight_kg:.6f} kg with alpha={alpha:.6f}"
+                    )
+        if food_chemical_mode == "chemical_below_food":
+            for chemical in solution.placements:
+                if not items[chemical.item].is_chemical:
+                    continue
+                for food in solution.placements:
+                    if (
+                        chemical.item != food.item
+                        and chemical.pallet == food.pallet
+                        and items[food.item].is_food
+                        and chemical.top > food.z
+                    ):
                         raise RuntimeError(
-                            f"mass-order violation: box {first.item} at z={first.z} weighs "
-                            f"{items[first.item].weight_kg:.6f} kg, exceeding alpha={alpha:.6f} "
-                            f"times box {second.item} at z={second.z}"
+                            f"chemical/food vertical-order violation: chemical box "
+                            f"{chemical.item} with top={chemical.top} extends above "
+                            f"food box {food.item} at z={food.z} on pallet {chemical.pallet}"
                         )
+        elif food_chemical_mode != "off":
+            raise ValueError("food_chemical_mode must be off or chemical_below_food")
 
     if support_mode == "off":
         return
@@ -320,6 +946,12 @@ class CoordinateBasedMILP:
         self.P = range(self.max_pallets)
         self.pairs = [(i, j) for i in self.I for j in self.I if i < j]
         self.ordered_pairs = [(i, j) for i in self.I for j in self.I if i != j]
+        self.food_chemical_mode = configured_food_chemical_mode(config)
+        self.chemical_food_pairs = [
+            (i, j)
+            for i, j in self.ordered_pairs
+            if items[i].is_chemical and items[j].is_food
+        ]
         rotation_mode = str(config.get("rotation_mode", "yaw"))
         self.orientations = {i: allowed_orientations(items[i], rotation_mode) for i in self.I}
         self.O = {i: range(len(self.orientations[i])) for i in self.I}
@@ -331,6 +963,9 @@ class CoordinateBasedMILP:
 
         self._create_core_variables()
         self._build_assignment_orientation_and_bounds()
+        self._build_fixed_pallet_count()
+        self._build_category_distance_objective()
+        self._build_food_chemical_vertical_order()
         self._build_non_overlap_and_overlap_logic()
         self._build_support()
         self._build_symmetry_breaking()
@@ -368,6 +1003,125 @@ class CoordinateBasedMILP:
 
     def height_expr(self, i: int, p: int):
         return gp.quicksum(self.orientations[i][o][2] * self.rotate[i, o, p] for o in self.O[i])
+
+    def _doubled_center_expr(self, i: int, axis: str):
+        """Return twice a box center on its selected pallet."""
+        starts = getattr(self, axis)
+        ends = getattr(self, f"{axis}_end")
+        return gp.quicksum(starts[i, p] + ends[i, p] for p in self.P)
+
+    def top_height_expr(self, i: int):
+        """Return the selected box's top-face height in grid units."""
+        return gp.quicksum(self.z_end[i, p] for p in self.P)
+
+    def _build_fixed_pallet_count(self) -> None:
+        """Optionally require an exact number of nonempty candidate pallets."""
+        configured = self.config.get("fixed_pallet_count")
+        if configured is None:
+            self.fixed_pallet_count = None
+            return
+        if not isinstance(configured, int) or isinstance(configured, bool):
+            raise ValueError("fixed_pallet_count must be an integer")
+        self.fixed_pallet_count = configured
+        if not 1 <= self.fixed_pallet_count <= self.max_pallets:
+            raise ValueError("fixed_pallet_count must be between 1 and max_pallets")
+        if self.fixed_pallet_count < self.volume_lower_bound:
+            raise ValueError(
+                "fixed_pallet_count is below the volume-based pallet lower bound"
+            )
+        self.model.addConstr(
+            gp.quicksum(self.used[p] for p in self.P) == self.fixed_pallet_count,
+            name="fixed_pallet_count",
+        )
+
+    def _build_category_distance_objective(self) -> None:
+        """Build exact pair distances for category-first objective modes."""
+        self.category_pairs = [(i, j) for i in self.I for j in self.I if i > j]
+        self.delta: dict[tuple[int, int], gp.Var] = {}
+        self.same_category_pallet: dict[tuple[int, int], gp.Var] = {}
+        self.category_center_difference: dict[tuple[int, int, str], gp.Var] = {}
+        self.category_center_absolute_difference: dict[tuple[int, int, str], gp.Var] = {}
+        self.category_distance_expr = gp.LinExpr(0.0)
+        if configured_objective_mode(self.config) not in CATEGORY_DISTANCE_OBJECTIVE_MODES:
+            return
+
+        L, W, H = self.pallet["length"], self.pallet["width"], self.pallet["height"]
+        cross_pallet_penalty = L + W + H + 1
+        axis_bounds = {"x": 2 * L, "y": 2 * W, "z": 2 * H}
+        for i, j in self.category_pairs:
+            same_category = self.items[i].retrieval_priority == self.items[j].retrieval_priority
+            delta = self.model.addVar(
+                lb=0,
+                ub=cross_pallet_penalty if same_category else 0,
+                vtype=GRB.CONTINUOUS,
+                name=f"category_delta[{i},{j}]",
+            )
+            self.delta[i, j] = delta
+            if not same_category:
+                continue
+
+            same_pallet = self.model.addVar(
+                vtype=GRB.BINARY, name=f"same_category_pallet[{i},{j}]"
+            )
+            self.same_category_pallet[i, j] = same_pallet
+            for p in self.P:
+                self.model.addConstr(
+                    same_pallet >= self.assign[i, p] + self.assign[j, p] - 1,
+                    name=f"same_category_pallet_lb[{i},{j},{p}]",
+                )
+                self.model.addConstr(
+                    same_pallet <= 1 - self.assign[i, p] + self.assign[j, p],
+                    name=f"same_category_pallet_i[{i},{j},{p}]",
+                )
+                self.model.addConstr(
+                    same_pallet <= 1 + self.assign[i, p] - self.assign[j, p],
+                    name=f"same_category_pallet_j[{i},{j},{p}]",
+                )
+
+            absolute_differences = []
+            for axis in ("x", "y", "z"):
+                bound = axis_bounds[axis]
+                difference = self.model.addVar(
+                    lb=-bound,
+                    ub=bound,
+                    vtype=GRB.INTEGER,
+                    name=f"category_center_diff2_{axis}[{i},{j}]",
+                )
+                absolute = self.model.addVar(
+                    lb=0,
+                    ub=bound,
+                    vtype=GRB.INTEGER,
+                    name=f"category_center_abs_diff2_{axis}[{i},{j}]",
+                )
+                self.category_center_difference[i, j, axis] = difference
+                self.category_center_absolute_difference[i, j, axis] = absolute
+                self.model.addConstr(
+                    difference
+                    == self._doubled_center_expr(i, axis)
+                    - self._doubled_center_expr(j, axis),
+                    name=f"category_center_difference_{axis}[{i},{j}]",
+                )
+                self.model.addGenConstrAbs(
+                    absolute,
+                    difference,
+                    name=f"category_center_absolute_difference_{axis}[{i},{j}]",
+                )
+                absolute_differences.append(absolute)
+
+            self.model.addGenConstrIndicator(
+                same_pallet,
+                True,
+                2 * delta == gp.quicksum(absolute_differences),
+                name=f"category_delta_same_pallet[{i},{j}]",
+            )
+            self.model.addGenConstrIndicator(
+                same_pallet,
+                False,
+                delta == cross_pallet_penalty,
+                name=f"category_delta_different_pallet[{i},{j}]",
+            )
+
+        self.category_distance_expr = gp.quicksum(self.delta.values())
 
     def _build_assignment_orientation_and_bounds(self) -> None:
         L, W, H = self.pallet["length"], self.pallet["width"], self.pallet["height"]
@@ -437,6 +1191,22 @@ class CoordinateBasedMILP:
         )
         for p in range(self.volume_lower_bound):
             self.model.addConstr(self.used[p] == 1, name=f"fix_volume_lb_pallet[{p}]")
+
+    def _build_food_chemical_vertical_order(self) -> None:
+        """Keep every chemical's top at or below every food on their shared pallet."""
+        self.food_chemical_constraint_count = 0
+        if self.food_chemical_mode == "off":
+            return
+        height = self.pallet["height"]
+        for chemical, food in self.chemical_food_pairs:
+            for p in self.P:
+                self.model.addConstr(
+                    self.z[chemical, p] + self.height_expr(chemical, p)
+                    <= self.z[food, p]
+                    + height * (2 - self.assign[chemical, p] - self.assign[food, p]),
+                    name=f"chemical_below_food[{chemical},{food},{p}]",
+                )
+                self.food_chemical_constraint_count += 1
 
     def _direction_var(self, name: str) -> dict[tuple[int, int, int], gp.Var]:
         return {
@@ -815,16 +1585,42 @@ class CoordinateBasedMILP:
 
     def _set_primary_objective(self) -> None:
         self.pallet_count_expr = gp.quicksum(self.used[p] for p in self.P)
-        self.model.setObjective(self.pallet_count_expr, GRB.MINIMIZE)
+        self.average_top_height_expr = gp.quicksum(
+            self.top_height_expr(i) for i in self.I
+        ) / len(self.items)
+        mode = configured_objective_mode(self.config)
+        objective = (
+            self.category_distance_expr
+            if mode in CATEGORY_DISTANCE_OBJECTIVE_MODES
+            else self.pallet_count_expr
+        )
+        self.model.setObjective(objective, GRB.MINIMIZE)
 
     def _optimize_lexicographic(self) -> None:
-        """Optimize pallet count first, then height without degrading pallets."""
-        mode = str(self.config.get("objective_mode", "pallet_count_only"))
-        if mode not in {"pallet_count_only", "pallets_then_max_height"}:
-            raise ValueError("objective_mode must be pallet_count_only or pallets_then_max_height")
+        """Optimize the selected primary objective and any enabled exact tie-breakers."""
+        mode = configured_objective_mode(self.config)
+        maximize_support_area = configured_support_area_objective(self.config)
+        if maximize_support_area and mode not in {
+            "pallets_then_max_height", "category_distance_only"
+        }:
+            raise ValueError(
+                "support-area maximization requires objective_mode=pallets_then_max_height "
+                "or category_distance_only"
+            )
+        if maximize_support_area and self.support_mode not in {"fraction", "full"}:
+            raise ValueError(
+                "support-area maximization requires support.mode=fraction or full"
+            )
         total_limit = float(self.config.get("time_limit_seconds", 300))
+        staged_average_height = mode == "pallets_then_average_height"
+        primary_limit = (
+            float(self.config.get("pallet_count_time_limit_seconds", total_limit))
+            if staged_average_height
+            else total_limit
+        )
         started = time.perf_counter()
         self._set_primary_objective()
+        self.model.Params.TimeLimit = primary_limit
         self.model.optimize()
         self.primary_objective_bound = float(self.model.ObjBound)
         self.primary_mip_gap = float(self.model.MIPGap) if self.model.SolCount else math.inf
@@ -834,18 +1630,119 @@ class CoordinateBasedMILP:
         self.secondary_optimized = False
         self.secondary_objective_bound = None
         self.secondary_mip_gap = None
-        if mode == "pallets_then_max_height" and self.model.SolCount and self.model.Status == GRB.OPTIMAL:
-            self.model.addConstr(
-                self.pallet_count_expr == self.primary_pallet_count,
-                name="fix_lexicographic_pallet_count",
+        self.tertiary_optimized = False
+        self.tertiary_objective_bound = None
+        self.tertiary_mip_gap = None
+        self.total_support_area_grid2 = 0.0
+        self.category_distance_optimized = mode in CATEGORY_DISTANCE_OBJECTIVE_MODES
+        self.category_distance_objective_bound = (
+            self.primary_objective_bound if self.category_distance_optimized else None
+        )
+        self.category_distance_mip_gap = (
+            self.primary_mip_gap if self.category_distance_optimized else None
+        )
+        self.total_category_distance_grid = (
+            float(sum(variable.X for variable in self.delta.values()))
+            if self.category_distance_optimized and self.model.SolCount
+            else None
+        )
+        self.footprint_depth_lower_bound = 0
+        self.footprint_height_lower_bound_grid = 0
+        height_modes = {
+            "pallets_then_max_height",
+            "pallets_then_average_height",
+            "category_distance_then_max_height",
+        }
+        height_predecessor_ready = (
+            self.model.SolCount
+            and (self.model.Status == GRB.OPTIMAL or staged_average_height)
+        )
+        if mode in height_modes and height_predecessor_ready:
+            if mode != "pallets_then_average_height":
+                (
+                    self.footprint_depth_lower_bound,
+                    self.footprint_height_lower_bound_grid,
+                ) = footprint_height_lower_bound(
+                    self.orientations,
+                    self.pallet["length"],
+                    self.pallet["width"],
+                    self.primary_pallet_count,
+                )
+            if mode in {"pallets_then_max_height", "pallets_then_average_height"}:
+                self.model.addConstr(
+                    self.pallet_count_expr == self.primary_pallet_count,
+                    name="fix_lexicographic_pallet_count",
+                )
+            else:
+                fixed_distance = round(
+                    2 * sum(variable.X for variable in self.delta.values())
+                ) / 2
+                self.model.addConstr(
+                    self.category_distance_expr == fixed_distance,
+                    name="fix_lexicographic_category_distance",
+                )
+            if mode != "pallets_then_average_height":
+                self.model.addConstr(
+                    self.max_height >= self.footprint_height_lower_bound_grid,
+                    name=f"footprint_height_lower_bound[{self.primary_pallet_count}]",
+                )
+            secondary_limit = (
+                float(self.config.get("height_time_limit_seconds", total_limit))
+                if staged_average_height
+                else max(1e-3, total_limit - (time.perf_counter() - started))
             )
-            remaining = max(1e-3, total_limit - (time.perf_counter() - started))
-            self.model.Params.TimeLimit = remaining
-            self.model.setObjective(self.max_height, GRB.MINIMIZE)
+            self.model.Params.TimeLimit = secondary_limit
+            secondary_objective = (
+                self.average_top_height_expr
+                if staged_average_height
+                else self.max_height
+            )
+            self.model.setObjective(secondary_objective, GRB.MINIMIZE)
             self.model.optimize()
             self.secondary_optimized = True
             self.secondary_objective_bound = float(self.model.ObjBound)
             self.secondary_mip_gap = float(self.model.MIPGap) if self.model.SolCount else None
+
+        support_predecessor_optimal = (
+            (mode == "pallets_then_max_height" and self.secondary_optimized)
+            or (mode == "category_distance_only" and self.category_distance_optimized)
+        )
+        if (
+            maximize_support_area
+            and support_predecessor_optimal
+            and self.model.SolCount
+            and self.model.Status == GRB.OPTIMAL
+        ):
+            if mode == "pallets_then_max_height":
+                fixed_height = int(round(self.max_height.X))
+                self.model.addConstr(
+                    self.max_height == fixed_height,
+                    name="fix_lexicographic_max_height",
+                )
+            else:
+                fixed_distance = round(
+                    2 * sum(variable.X for variable in self.delta.values())
+                ) / 2
+                self.model.addConstr(
+                    self.category_distance_expr == fixed_distance,
+                    name="fix_lexicographic_category_distance",
+                )
+            remaining = max(1e-3, total_limit - (time.perf_counter() - started))
+            self.model.Params.TimeLimit = remaining
+            self.total_support_area_expr = gp.quicksum(self.support_area.values())
+            self.model.setObjective(self.total_support_area_expr, GRB.MAXIMIZE)
+            self.model.optimize()
+            self.tertiary_optimized = True
+            self.tertiary_objective_bound = float(self.model.ObjBound)
+            self.tertiary_mip_gap = float(self.model.MIPGap) if self.model.SolCount else None
+        if self.model.SolCount and self.support_area:
+            self.total_support_area_grid2 = float(
+                sum(variable.X for variable in self.support_area.values())
+            )
+        if self.category_distance_optimized and self.model.SolCount:
+            self.total_category_distance_grid = float(
+                sum(variable.X for variable in self.delta.values())
+            )
         self.total_optimization_runtime = time.perf_counter() - started
 
     def solve(self) -> CoordinateSolution:
@@ -880,9 +1777,22 @@ class CoordinateBasedMILP:
             runtime_seconds=self.total_optimization_runtime,
             placements=selected,
             max_height_grid=max(placement.top for placement in selected),
+            average_top_height_grid=sum(placement.top for placement in selected) / len(selected),
             height_objective_bound_grid=self.secondary_objective_bound,
             height_mip_gap=self.secondary_mip_gap,
             height_stage_attempted=self.secondary_optimized,
+            footprint_depth_lower_bound=self.footprint_depth_lower_bound,
+            footprint_height_lower_bound_grid=self.footprint_height_lower_bound_grid,
+            support_area_grid2=self.total_support_area_grid2,
+            support_area_objective_bound_grid2=self.tertiary_objective_bound,
+            support_area_mip_gap=self.tertiary_mip_gap,
+            support_area_stage_attempted=self.tertiary_optimized,
+            objective_mode=configured_objective_mode(self.config),
+            category_distance_grid=self.total_category_distance_grid,
+            category_distance_objective_bound_grid=self.category_distance_objective_bound,
+            category_distance_mip_gap=self.category_distance_mip_gap,
+            category_distance_stage_attempted=self.category_distance_optimized,
+            fixed_pallet_count=self.fixed_pallet_count,
         )
 
 
@@ -895,10 +1805,17 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
     represented once and activated only when two boxes share a pallet.
     """
 
-    def __init__(self, context: dict[str, Any], items: list[CoordinateItem], config: dict[str, Any]):
+    def __init__(
+        self,
+        context: dict[str, Any],
+        items: list[CoordinateItem],
+        config: dict[str, Any],
+        prepared_warm_start: list[CoordinatePlacement] | None = None,
+    ):
         self.context = context
         self.items = items
         self.config = config
+        self.prepared_warm_start = prepared_warm_start
         self.pallet = context["pallet"]
         self.max_pallets = int(config.get("max_pallets", 2))
         if self.max_pallets <= 0:
@@ -909,6 +1826,30 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         self.P = range(self.max_pallets)
         self.pairs = [(i, j) for i in self.I for j in self.I if i < j]
         self.ordered_pairs = [(i, j) for i in self.I for j in self.I if i != j]
+        self.food_chemical_mode = configured_food_chemical_mode(config)
+        self.chemical_food_pairs = [
+            (i, j)
+            for i, j in self.ordered_pairs
+            if items[i].is_chemical and items[j].is_food
+        ]
+        alpha = float(config.get("stacking_mass_alpha", 1.2))
+        if not math.isfinite(alpha) or alpha < 1.0:
+            raise ValueError("stacking_mass_alpha must be finite and at least 1.0")
+        self.stacking_mass_alpha = alpha
+        self.allowed_support_arcs = [
+            (lower, upper)
+            for lower, upper in self.ordered_pairs
+            if self.mass[upper] <= alpha * self.mass[lower] + 1e-12
+        ]
+        self.allowed_supporters = {
+            upper: [
+                lower
+                for lower in self.I
+                if lower != upper and (lower, upper) in self.allowed_support_arcs
+            ]
+            for upper in self.I
+        }
+        self.forbidden_support_arc_count = len(self.ordered_pairs) - len(self.allowed_support_arcs)
         rotation_mode = str(config.get("rotation_mode", "yaw"))
         L, W, H = self.pallet["length"], self.pallet["width"], self.pallet["height"]
         self.orientations = {}
@@ -929,11 +1870,16 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
 
         self._create_reduced_variables()
         self._build_reduced_assignment_and_bounds()
+        self._build_fixed_pallet_count()
+        self._build_category_distance_objective()
+        self._build_food_chemical_vertical_order()
         self._build_reduced_non_overlap()
         self._build_reduced_support()
         self._build_reduced_symmetry()
         self._set_primary_objective()
         self.model.update()
+        self.greedy_start_attempted = False
+        self.greedy_start_applied = False
 
     def _create_reduced_variables(self) -> None:
         L, W, H = self.pallet["length"], self.pallet["width"], self.pallet["height"]
@@ -961,6 +1907,14 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
 
     def height_expr(self, i: int):
         return gp.quicksum(self.orientations[i][o][2] * self.rotate[i, o] for o in self.O[i])
+
+    def _doubled_center_expr(self, i: int, axis: str):
+        starts = getattr(self, axis)
+        ends = getattr(self, f"{axis}_end")
+        return starts[i] + ends[i]
+
+    def top_height_expr(self, i: int):
+        return self.z_end[i]
 
     def base_area_expr(self, i: int):
         return gp.quicksum(
@@ -996,28 +1950,34 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
                 name=f"payload_capacity[{p}]",
             )
 
-        alpha = float(self.config.get("stacking_mass_alpha", 1.2))
-        if not math.isfinite(alpha) or alpha < 1.0:
-            raise ValueError("stacking_mass_alpha must be finite and at least 1.0")
-        self.stacking_mass_alpha = alpha
-        for i, j in self.ordered_pairs:
-            if self.mass[i] <= alpha * self.mass[j] + 1e-12:
-                continue
-            for p in self.P:
-                self.model.addConstr(
-                    self.z[i]
-                    <= self.z[j] - 1
-                    + self.pallet["height"] * (2 - self.assign[i, p] - self.assign[j, p]),
-                    name=f"mass_above_ratio[{i},{j},{p}]",
-                )
         total_volume = sum(item_volume.values())
         self.volume_lower_bound = max(1, math.ceil(total_volume / pallet_volume))
         if self.volume_lower_bound > self.max_pallets:
             raise ValueError(
                 f"at least {self.volume_lower_bound} pallets are required by volume, but max_pallets={self.max_pallets}"
             )
+        self.model.addConstr(
+            gp.quicksum(self.used[p] for p in self.P) >= self.volume_lower_bound,
+            name="volume_pallet_lower_bound",
+        )
         for p in range(self.volume_lower_bound):
             self.model.addConstr(self.used[p] == 1, name=f"fix_volume_lb_pallet[{p}]")
+
+    def _build_food_chemical_vertical_order(self) -> None:
+        """Reduced-geometry version of the pallet-conditional top-ordering rows."""
+        self.food_chemical_constraint_count = 0
+        if self.food_chemical_mode == "off":
+            return
+        height = self.pallet["height"]
+        for chemical, food in self.chemical_food_pairs:
+            for p in self.P:
+                self.model.addConstr(
+                    self.z[chemical] + self.height_expr(chemical)
+                    <= self.z[food]
+                    + height * (2 - self.assign[chemical, p] - self.assign[food, p]),
+                    name=f"chemical_below_food[{chemical},{food},{p}]",
+                )
+                self.food_chemical_constraint_count += 1
 
     def _global_direction_var(self, name: str) -> dict[tuple[int, int], gp.Var]:
         return {
@@ -1148,7 +2108,7 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
 
         if mode == "direct":
             self._build_reduced_overlap_indicators()
-        for i, j in self.ordered_pairs:
+        for i, j in self.allowed_support_arcs:
             contact = self.model.addVar(vtype=GRB.BINARY, name=f"supports[{i},{j}]")
             self.contact[i, j] = contact
             self._same_pallet_contact_constraints(contact, i, j)
@@ -1162,14 +2122,16 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         if mode == "direct":
             for j in self.I:
                 self.model.addConstr(
-                    self.floor[j] + gp.quicksum(self.contact[i, j] for i in self.I if i != j) >= 1,
+                    self.floor[j]
+                    + gp.quicksum(self.contact[i, j] for i in self.allowed_supporters[j])
+                    >= 1,
                     name=f"direct_support[{j}]",
                 )
             return
 
         self._build_reduced_overlap_area()
         max_area = self.pallet["length"] * self.pallet["width"]
-        for i, j in self.ordered_pairs:
+        for i, j in self.allowed_support_arcs:
             area = self.area[min(i, j), max(i, j)]
             contact = self.contact[i, j]
             supported = self.model.addVar(lb=0, ub=max_area, vtype=self._reduced_area_vtype(), name=f"support_area[{i},{j}]")
@@ -1186,7 +2148,8 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         for j in self.I:
             max_base = max(dx * dy for dx, dy, _ in self.orientations[j])
             self.model.addConstr(
-                denominator * gp.quicksum(self.support_area[i, j] for i in self.I if i != j)
+                denominator
+                * gp.quicksum(self.support_area[i, j] for i in self.allowed_supporters[j])
                 + numerator * max_base * self.floor[j]
                 >= numerator * self.base_area_expr(j),
                 name=f"support_fraction[{j}]",
@@ -1229,7 +2192,57 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
                         name=f"identical_position_order[{first},{second},{p}]",
                     )
 
+    def apply_greedy_start(self) -> bool:
+        """Populate a partial MIP start without changing the formulation."""
+        if self.greedy_start_attempted:
+            return self.greedy_start_applied
+        self.greedy_start_attempted = True
+        if not self.config.get("warm_start", {}).get("greedy", False):
+            return False
+        placements = self.prepared_warm_start
+        if placements is None:
+            placements = greedy_coordinate_warm_start(
+                self.context, self.items, self.orientations, self.config,
+                max_pallets=None,
+            )
+        if placements is None:
+            return False
+        required_pallets = 1 + max(placement.pallet for placement in placements)
+        if required_pallets > self.max_pallets:
+            # A directly instantiated model cannot gain pallet-indexed
+            # variables after construction. solve_instance prepares the start
+            # first and expands max_pallets before it builds the model.
+            return False
+        try:
+            audit_coordinate_warm_start(
+                placements, self.context, self.items, self.config
+            )
+        except RuntimeError:
+            return False
+
+        by_item = {placement.item: placement for placement in placements}
+        used_pallets = {placement.pallet for placement in placements}
+        for p in self.P:
+            self.used[p].Start = 1.0 if p in used_pallets else 0.0
+        for i in self.I:
+            placement = by_item[i]
+            for p in self.P:
+                self.assign[i, p].Start = 1.0 if p == placement.pallet else 0.0
+            for o in self.O[i]:
+                self.rotate[i, o].Start = 1.0 if o == placement.orientation else 0.0
+            self.x[i].Start = placement.x
+            self.y[i].Start = placement.y
+            self.z[i].Start = placement.z
+            self.x_end[i].Start = placement.x + placement.dx
+            self.y_end[i].Start = placement.y + placement.dy
+            self.z_end[i].Start = placement.top
+        self.max_height.Start = max(placement.top for placement in placements)
+        self.model.update()
+        self.greedy_start_applied = True
+        return True
+
     def solve(self) -> CoordinateSolution:
+        self.apply_greedy_start()
         self._optimize_lexicographic()
         if self.model.SolCount == 0:
             status = status_name(self.model.Status)
@@ -1244,6 +2257,14 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
                 x=int(round(self.x[i].X)), y=int(round(self.y[i].X)), z=int(round(self.z[i].X)),
                 dx=dx, dy=dy, dz=dz,
             ))
+        selected_support_arcs = []
+        for arc, contact in self.contact.items():
+            if contact.X <= 0.5:
+                continue
+            supported_area = self.support_area.get(arc)
+            if supported_area is not None and supported_area.X <= 1e-6:
+                continue
+            selected_support_arcs.append(arc)
         return CoordinateSolution(
             status=status_name(self.model.Status),
             pallet_count=int(round(sum(self.used[p].X for p in self.P))),
@@ -1252,9 +2273,23 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
             runtime_seconds=self.total_optimization_runtime,
             placements=selected,
             max_height_grid=max(placement.top for placement in selected),
+            average_top_height_grid=sum(placement.top for placement in selected) / len(selected),
             height_objective_bound_grid=self.secondary_objective_bound,
             height_mip_gap=self.secondary_mip_gap,
             height_stage_attempted=self.secondary_optimized,
+            footprint_depth_lower_bound=self.footprint_depth_lower_bound,
+            footprint_height_lower_bound_grid=self.footprint_height_lower_bound_grid,
+            support_area_grid2=self.total_support_area_grid2,
+            support_area_objective_bound_grid2=self.tertiary_objective_bound,
+            support_area_mip_gap=self.tertiary_mip_gap,
+            support_area_stage_attempted=self.tertiary_optimized,
+            support_arcs=selected_support_arcs,
+            objective_mode=configured_objective_mode(self.config),
+            category_distance_grid=self.total_category_distance_grid,
+            category_distance_objective_bound_grid=self.category_distance_objective_bound,
+            category_distance_mip_gap=self.category_distance_mip_gap,
+            category_distance_stage_attempted=self.category_distance_optimized,
+            fixed_pallet_count=self.fixed_pallet_count,
         )
 
 
@@ -1298,12 +2333,60 @@ def solution_rows(
                 "family": item.family,
                 "is_food": item.is_food,
                 "is_chemical": item.is_chemical,
+                "class_label": (
+                    "FC" if item.is_food and item.is_chemical
+                    else "F" if item.is_food
+                    else "C" if item.is_chemical
+                    else ""
+                ),
                 "fragile": item.fragile,
                 "retrieval_priority": item.retrieval_priority,
                 "support_fraction": support_fraction(placement, solution.placements),
             }
         )
     return rows
+
+
+_CATEGORY_BASE_COLORS = (
+    "#1f77b4",  # priority 1: blue
+    "#ff7f0e",  # priority 2: orange
+    "#2ca02c",  # priority 3: green
+    "#d62728",  # priority 4: red
+    "#9467bd",  # priority 5: purple
+    "#8c564b",
+    "#e377c2",
+    "#17becf",
+)
+
+
+def _shade_toward_white(hex_color: str, fraction: float) -> str:
+    """Return a lighter shade while retaining the base category hue."""
+    fraction = min(1.0, max(0.0, fraction))
+    channels = [int(hex_color[offset : offset + 2], 16) for offset in (1, 3, 5)]
+    shaded = [round(channel + (255 - channel) * fraction) for channel in channels]
+    return "#" + "".join(f"{channel:02x}" for channel in shaded)
+
+
+def category_type_colors(rows: list[dict[str, Any]]) -> list[str]:
+    """Map priority categories to hues and SKUs within each category to shades."""
+    skus_by_category: dict[int, list[int]] = {}
+    for row in rows:
+        priority = int(row["retrieval_priority"])
+        skus_by_category.setdefault(priority, []).append(int(row["sku"]))
+    skus_by_category = {
+        priority: sorted(set(skus)) for priority, skus in skus_by_category.items()
+    }
+
+    colors_by_category_sku: dict[tuple[int, int], str] = {}
+    for priority, skus in skus_by_category.items():
+        base = _CATEGORY_BASE_COLORS[(priority - 1) % len(_CATEGORY_BASE_COLORS)]
+        for shade_index, sku in enumerate(skus):
+            shade = 0.0 if len(skus) == 1 else 0.42 * shade_index / (len(skus) - 1)
+            colors_by_category_sku[priority, sku] = _shade_toward_white(base, shade)
+    return [
+        colors_by_category_sku[int(row["retrieval_priority"]), int(row["sku"])]
+        for row in rows
+    ]
 
 
 def render_solution(
@@ -1344,6 +2427,54 @@ def render_solution(
         True,
         case_ids,
     )
+    box_colors = category_type_colors(rows)
+    visible_legend_entries: set[tuple[int, int]] = set()
+    for trace, row, color in zip(figure.data, rows, box_colors):
+        priority = int(row["retrieval_priority"])
+        sku = int(row["sku"])
+        legend_key = priority, sku
+        trace.update(
+            color=color,
+            name=f"SKU {sku} · {row['family']}",
+            legendgroup=f"priority-{priority}",
+            legendgrouptitle_text=f"Priority {priority}",
+            showlegend=legend_key not in visible_legend_entries,
+            hovertemplate=(
+                f"Box {row['box_id']}<br>Priority {priority}<br>SKU {sku}"
+                f"<br>Family {row['family']}<br>Class {row['class_label']}<extra></extra>"
+            ),
+        )
+        visible_legend_entries.add(legend_key)
+    label_offset = max(0.04 * grid * scale, 0.5)
+    label_styles = {
+        "F": ("Food (F)", "darkgreen"),
+        "C": ("Chemical (C)", "firebrick"),
+        "FC": ("Food and chemical (FC)", "darkorange"),
+    }
+    for label, (trace_name, color) in label_styles.items():
+        labelled = [
+            (row, position, size)
+            for row, position, size in zip(rows, positions, sizes)
+            if row["class_label"] == label
+        ]
+        if not labelled:
+            continue
+        figure.add_trace(
+            go.Scatter3d(
+                x=[position[0] + size[0] / 2 for _, position, size in labelled],
+                y=[position[1] + size[1] / 2 for _, position, size in labelled],
+                z=[position[2] + size[2] + label_offset for _, position, size in labelled],
+                mode="text",
+                text=[label] * len(labelled),
+                textfont={"color": color, "size": 18},
+                name=trace_name,
+                hovertext=[
+                    f"Box {row['box_id']} · SKU {row['sku']} · {trace_name}"
+                    for row, _, _ in labelled
+                ],
+                hoverinfo="text",
+            )
+        )
     for p in range(solution.pallet_count):
         left = p * pallet["length_mm"] * scale
         right = (p + 1) * pallet["length_mm"] * scale
@@ -1360,7 +2491,7 @@ def render_solution(
     figure.update_layout(
         title=(
             f"Coordinate MILP: pallets={solution.pallet_count}, status={solution.status}, "
-            f"gap={100 * solution.mip_gap:.2f}%"
+            f"gap={100 * solution.mip_gap:.2f}% · hue=priority, shade=SKU/type"
         ),
         scene={
             "aspectmode": "data",
@@ -1403,14 +2534,45 @@ def write_outputs(
         "formulation": "coordinate-based pairwise non-overlap MILP",
         "metrics": {
             "status": solution.status,
+            "objective_mode": solution.objective_mode,
+            "fixed_pallet_count": solution.fixed_pallet_count,
             "pallet_count": solution.pallet_count,
             "max_height_mm": solution.max_height_grid * context["grid_mm"],
+            "average_top_height_mm": solution.average_top_height_grid * context["grid_mm"],
+            "footprint_depth_lower_bound": solution.footprint_depth_lower_bound,
+            "footprint_height_lower_bound_mm": (
+                solution.footprint_height_lower_bound_grid * context["grid_mm"]
+            ),
             "height_objective_bound_mm": (
                 solution.height_objective_bound_grid * context["grid_mm"]
                 if solution.height_objective_bound_grid is not None else None
             ),
             "height_mip_gap": solution.height_mip_gap,
             "height_stage_attempted": solution.height_stage_attempted,
+            "support_area_mm2": solution.support_area_grid2 * context["grid_mm"] ** 2,
+            "support_area_objective_bound_mm2": (
+                solution.support_area_objective_bound_grid2 * context["grid_mm"] ** 2
+                if solution.support_area_objective_bound_grid2 is not None else None
+            ),
+            "support_area_mip_gap": solution.support_area_mip_gap,
+            "support_area_stage_attempted": solution.support_area_stage_attempted,
+            "support_area_objective_enabled": context.get(
+                "support_area_objective_enabled", False
+            ),
+            "category_distance_grid": solution.category_distance_grid,
+            "category_distance_mm": (
+                solution.category_distance_grid * context["grid_mm"]
+                if solution.category_distance_grid is not None else None
+            ),
+            "category_distance_objective_bound_grid": (
+                solution.category_distance_objective_bound_grid
+            ),
+            "category_distance_objective_bound_mm": (
+                solution.category_distance_objective_bound_grid * context["grid_mm"]
+                if solution.category_distance_objective_bound_grid is not None else None
+            ),
+            "category_distance_mip_gap": solution.category_distance_mip_gap,
+            "category_distance_stage_attempted": solution.category_distance_stage_attempted,
             "volume_utilization": total_volume / available_volume,
             "objective_bound": solution.objective_bound,
             "mip_gap": solution.mip_gap,
@@ -1419,26 +2581,64 @@ def write_outputs(
             "pallet_payload_capacity_kg": pallet["payload_kg"],
             "pallet_payloads_kg": pallet_payloads,
             "stacking_mass_alpha": context.get("stacking_mass_alpha", 1.2),
+            "food_chemical_mode": context.get("food_chemical_mode", "off"),
+            "selected_support_arc_count": len(solution.support_arcs),
         },
+        "support_arcs": [
+            {
+                "lower_box_index": lower,
+                "lower_box_id": items[lower].id,
+                "lower_mass_kg": items[lower].weight_kg,
+                "upper_box_index": upper,
+                "upper_box_id": items[upper].id,
+                "upper_mass_kg": items[upper].weight_kg,
+            }
+            for lower, upper in solution.support_arcs
+        ],
         "placements": rows,
     }
     (output_dir / f"{stem}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     with (output_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow([
-            "status", "pallet_count", "max_height_mm", "height_objective_bound_mm",
+            "status", "objective_mode", "fixed_pallet_count", "pallet_count",
+            "max_height_mm", "average_top_height_mm", "footprint_depth_lower_bound",
+            "footprint_height_lower_bound_mm", "height_objective_bound_mm",
             "height_mip_gap", "height_stage_attempted", "volume_utilization",
+            "support_area_mm2", "support_area_objective_bound_mm2",
+            "support_area_mip_gap", "support_area_stage_attempted",
+            "support_area_objective_enabled",
+            "category_distance_grid", "category_distance_mm",
+            "category_distance_objective_bound_grid",
+            "category_distance_objective_bound_mm", "category_distance_mip_gap",
+            "category_distance_stage_attempted",
             "objective_bound", "mip_gap", "runtime_seconds",
         ])
         writer.writerow(
             [
                 solution.status,
+                solution.objective_mode,
+                solution.fixed_pallet_count,
                 solution.pallet_count,
                 payload["metrics"]["max_height_mm"],
+                payload["metrics"]["average_top_height_mm"],
+                solution.footprint_depth_lower_bound,
+                payload["metrics"]["footprint_height_lower_bound_mm"],
                 payload["metrics"]["height_objective_bound_mm"],
                 solution.height_mip_gap,
                 solution.height_stage_attempted,
                 payload["metrics"]["volume_utilization"],
+                payload["metrics"]["support_area_mm2"],
+                payload["metrics"]["support_area_objective_bound_mm2"],
+                solution.support_area_mip_gap,
+                solution.support_area_stage_attempted,
+                payload["metrics"]["support_area_objective_enabled"],
+                solution.category_distance_grid,
+                payload["metrics"]["category_distance_mm"],
+                solution.category_distance_objective_bound_grid,
+                payload["metrics"]["category_distance_objective_bound_mm"],
+                solution.category_distance_mip_gap,
+                solution.category_distance_stage_attempted,
                 solution.objective_bound,
                 solution.mip_gap,
                 solution.runtime_seconds,
@@ -1476,10 +2676,31 @@ def solve_instance(
     context, items = read_mcpp_json(input_path, config)
     started = time.perf_counter()
     model_variant = str(config.get("model_variant", "legacy"))
+    prepared_warm_start = None
+    if (
+        model_variant == "reduced_exact"
+        and config.get("warm_start", {}).get("greedy", False)
+    ):
+        prepared_warm_start = prepare_unlimited_coordinate_warm_start(
+            context, items, config
+        )
+        if prepared_warm_start is not None:
+            required_pallets = 1 + max(
+                placement.pallet for placement in prepared_warm_start
+            )
+            fixed_pallet_count = config.get("fixed_pallet_count")
+            if fixed_pallet_count is None:
+                config["max_pallets"] = max(
+                    int(config.get("max_pallets", 1)), required_pallets
+                )
+            elif int(fixed_pallet_count) != required_pallets:
+                prepared_warm_start = None
     if model_variant == "legacy":
         exact = CoordinateBasedMILP(context, items, config)
     elif model_variant == "reduced_exact":
-        exact = ReducedExactCoordinateMILP(context, items, config)
+        exact = ReducedExactCoordinateMILP(
+            context, items, config, prepared_warm_start=prepared_warm_start
+        )
     else:
         raise ValueError("model_variant must be legacy or reduced_exact")
     try:
@@ -1488,7 +2709,11 @@ def solve_instance(
             "variables": exact.model.NumVars,
             "linear_constraints": exact.model.NumConstrs,
             "general_constraints": exact.model.NumGenConstrs,
+            "food_chemical_constraints": exact.food_chemical_constraint_count,
         }
+        if model_variant == "reduced_exact":
+            stats["allowed_support_arcs"] = len(exact.allowed_support_arcs)
+            stats["forbidden_support_arcs"] = exact.forbidden_support_arc_count
         solution = exact.solve()
         support_config = config.get("support", {"mode": "fraction", "minimum_fraction": 0.75})
         audit_solution(
@@ -1498,6 +2723,7 @@ def solve_instance(
             float(support_config.get("minimum_fraction", 0.75)),
             items,
             float(config.get("stacking_mass_alpha", 1.2)) if model_variant == "reduced_exact" else None,
+            configured_food_chemical_mode(config),
         )
         solution.runtime_seconds = time.perf_counter() - started
         write_outputs(solution, items, context, output_dir)
@@ -1521,19 +2747,38 @@ def write_batch_summary(records: list[dict[str, Any]], output_dir: Path) -> None
         "instance",
         "input_file",
         "status",
+        "objective_mode",
+        "fixed_pallet_count",
         "n_boxes",
         "max_pallets",
         "pallet_count",
         "max_height_mm",
+        "average_top_height_mm",
+        "footprint_depth_lower_bound",
+        "footprint_height_lower_bound_mm",
         "height_objective_bound_mm",
         "height_mip_gap",
         "height_stage_attempted",
+        "support_area_mm2",
+        "support_area_objective_bound_mm2",
+        "support_area_mip_gap",
+        "support_area_stage_attempted",
+        "support_area_objective_enabled",
+        "category_distance_grid",
+        "category_distance_mm",
+        "category_distance_objective_bound_grid",
+        "category_distance_objective_bound_mm",
+        "category_distance_mip_gap",
+        "category_distance_stage_attempted",
         "objective_bound",
         "mip_gap",
         "runtime_seconds",
         "variables",
         "linear_constraints",
         "general_constraints",
+        "allowed_support_arcs",
+        "forbidden_support_arcs",
+        "food_chemical_constraints",
         "output_directory",
         "error_type",
         "error",
@@ -1572,10 +2817,17 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 "instance": context.get("payload", {}).get("meta", {}).get("name", name),
                 "input_file": str(input_path),
                 "status": solution.status,
+                "objective_mode": solution.objective_mode,
+                "fixed_pallet_count": solution.fixed_pallet_count,
                 "n_boxes": len(items),
                 "max_pallets": int(config["max_pallets"]),
                 "pallet_count": solution.pallet_count,
                 "max_height_mm": solution.max_height_grid * context["grid_mm"],
+                "average_top_height_mm": solution.average_top_height_grid * context["grid_mm"],
+                "footprint_depth_lower_bound": solution.footprint_depth_lower_bound,
+                "footprint_height_lower_bound_mm": (
+                    solution.footprint_height_lower_bound_grid * context["grid_mm"]
+                ),
                 "height_objective_bound_mm": (
                     solution.height_objective_bound_grid * context["grid_mm"]
                     if solution.height_objective_bound_grid is not None else ""
@@ -1584,6 +2836,38 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                     solution.height_mip_gap if solution.height_mip_gap is not None else ""
                 ),
                 "height_stage_attempted": solution.height_stage_attempted,
+                "support_area_mm2": solution.support_area_grid2 * context["grid_mm"] ** 2,
+                "support_area_objective_bound_mm2": (
+                    solution.support_area_objective_bound_grid2 * context["grid_mm"] ** 2
+                    if solution.support_area_objective_bound_grid2 is not None else ""
+                ),
+                "support_area_mip_gap": (
+                    solution.support_area_mip_gap
+                    if solution.support_area_mip_gap is not None else ""
+                ),
+                "support_area_stage_attempted": solution.support_area_stage_attempted,
+                "support_area_objective_enabled": configured_support_area_objective(config),
+                "category_distance_grid": (
+                    solution.category_distance_grid
+                    if solution.category_distance_grid is not None else ""
+                ),
+                "category_distance_mm": (
+                    solution.category_distance_grid * context["grid_mm"]
+                    if solution.category_distance_grid is not None else ""
+                ),
+                "category_distance_objective_bound_grid": (
+                    solution.category_distance_objective_bound_grid
+                    if solution.category_distance_objective_bound_grid is not None else ""
+                ),
+                "category_distance_objective_bound_mm": (
+                    solution.category_distance_objective_bound_grid * context["grid_mm"]
+                    if solution.category_distance_objective_bound_grid is not None else ""
+                ),
+                "category_distance_mip_gap": (
+                    solution.category_distance_mip_gap
+                    if solution.category_distance_mip_gap is not None else ""
+                ),
+                "category_distance_stage_attempted": solution.category_distance_stage_attempted,
                 "objective_bound": solution.objective_bound,
                 "mip_gap": solution.mip_gap,
                 "runtime_seconds": solution.runtime_seconds,
@@ -1596,10 +2880,15 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 f"{100 * solution.height_mip_gap:.3f}%"
                 if solution.height_mip_gap is not None else "n/a"
             )
+            objective_detail = (
+                f"category_distance={solution.category_distance_grid:.3f} grid units, "
+                if solution.category_distance_grid is not None
+                else f"height={solution.max_height_grid * context['grid_mm']} mm, "
+            )
             print(
                 f"  {solution.status}: pallets={solution.pallet_count}, "
                 f"primary_gap={100 * solution.mip_gap:.3f}%, "
-                f"height={solution.max_height_grid * context['grid_mm']} mm, "
+                f"{objective_detail}"
                 f"height_gap={height_gap}, runtime={solution.runtime_seconds:.2f}s"
             )
         except Exception as exc:  # Continue so one difficult instance does not lose the batch report.
@@ -1616,13 +2905,29 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 "instance": name,
                 "input_file": str(input_path),
                 "status": "ERROR",
+                "objective_mode": str(config.get("objective_mode", "pallet_count_only")),
+                "fixed_pallet_count": config.get("fixed_pallet_count", ""),
                 "n_boxes": "",
                 "max_pallets": int(config.get("max_pallets", 0)),
                 "pallet_count": "",
                 "max_height_mm": "",
+                "average_top_height_mm": "",
+                "footprint_depth_lower_bound": "",
+                "footprint_height_lower_bound_mm": "",
                 "height_objective_bound_mm": "",
                 "height_mip_gap": "",
                 "height_stage_attempted": "",
+                "support_area_mm2": "",
+                "support_area_objective_bound_mm2": "",
+                "support_area_mip_gap": "",
+                "support_area_stage_attempted": "",
+                "support_area_objective_enabled": configured_support_area_objective(config),
+                "category_distance_grid": "",
+                "category_distance_mm": "",
+                "category_distance_objective_bound_grid": "",
+                "category_distance_objective_bound_mm": "",
+                "category_distance_mip_gap": "",
+                "category_distance_stage_attempted": "",
                 "objective_bound": "",
                 "mip_gap": "",
                 "runtime_seconds": time.perf_counter() - started,
@@ -1672,10 +2977,18 @@ def main() -> int:
         args.write_lp,
         args.print_model,
     )
+    if solution.category_distance_grid is not None:
+        objective_detail = f"category_distance={solution.category_distance_grid:.3f} grid units; "
+    elif solution.objective_mode == "pallets_then_average_height":
+        objective_detail = (
+            f"average_top_height={solution.average_top_height_grid * context['grid_mm']:.3f} mm; "
+        )
+    else:
+        objective_detail = f"max_height={solution.max_height_grid * context['grid_mm']} mm; "
     print(
         f"Status={solution.status}; pallets={solution.pallet_count}; "
         f"primary_gap={100 * solution.mip_gap:.3f}%; "
-        f"max_height={solution.max_height_grid * context['grid_mm']} mm; "
+        f"{objective_detail}"
         f"height_gap="
         + (
             f"{100 * solution.height_mip_gap:.3f}%"

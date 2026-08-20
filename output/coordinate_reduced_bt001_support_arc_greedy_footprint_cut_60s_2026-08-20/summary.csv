@@ -1,0 +1,2 @@
+status,pallet_count,max_height_mm,footprint_depth_lower_bound,footprint_height_lower_bound_mm,height_objective_bound_mm,height_mip_gap,height_stage_attempted,volume_utilization,objective_bound,mip_gap,runtime_seconds
+OPTIMAL,1,300,2,300,300.0,0.0,True,0.10908564814814815,1.0,0.0,2.0768719000043347

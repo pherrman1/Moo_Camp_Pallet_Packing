@@ -112,9 +112,10 @@ MCPP item minimally needs:
 }
 ```
 
-Optional fields such as `weight_kg`, `family`, `is_food`, `is_chemical`,
-`fragile`, `upright_only`, and `retrieval_priority` are preserved in the result.
-They are reserved for later model extensions.
+`weight_kg` is used by the pallet-payload and support-mass constraints.
+`is_food` and `is_chemical` (or the equivalent `group` value) are used when
+the optional food/chemical ordering rule is active; the remaining metadata is
+preserved for later model extensions.
 
 ## 6. Important configuration fields
 
@@ -123,15 +124,70 @@ Edit `configs/gurobi_coordinate_default.json` or provide another config file:
 - `grid_mm`: coordinate resolution; smaller values are more accurate but harder;
 - `max_items`: input-size guard;
 - `max_pallets`: number of candidate pallets;
+- `fixed_pallet_count`: optional exact number of nonempty pallets; it must be
+  between the volume lower bound and `max_pallets`;
 - `time_limit_seconds`: Gurobi time limit;
 - `mip_gap`: requested relative optimality gap;
+- `objective_mode`: `pallet_count_only`, `pallets_then_max_height`,
+  `pallets_then_average_height`,
+  `category_distance_only`, or `category_distance_then_max_height`;
 - `rotation_mode`: `none`, `yaw`, `metadata`, or `six`;
 - `support.mode`: `off`, `direct`, `fraction`, or `full`;
 - `support.minimum_fraction`: `0.75` for the project requirement;
+- `food_chemical.mode`: `off` or `chemical_below_food`; the latter requires
+  every chemical box's top coordinate to be at or below the base coordinate of
+  every food box assigned to the same pallet;
+- `support_area_objective.enabled`: when `true`, maximize the exact sum of
+  box-on-box support areas as a third lexicographic stage after optimal pallet
+  count and optimal maximum height; this requires `support.mode` to be
+  `fraction` or `full`;
+- `warm_start.greedy`: opt in to a fast chemical-first height-map packing
+  supplied to the reduced-exact model as a partial Gurobi MIP start;
 - `symmetry`: enables the implemented symmetry-breaking constraints.
 
-The current objective is only the number of used pallets. Accessibility,
-weight placement, and food/chemical rules are not active yet.
+The warm start is disabled when the field is omitted. To enable it without
+changing the mathematical model, add:
+
+```json
+"warm_start": {
+  "greedy": true
+}
+```
+
+If the heuristic cannot pack every box within `max_pallets`, the solver simply
+continues without a user MIP start. The legacy model variant does not use this
+option.
+
+The heuristic first packs all chemical boxes using first-fit pallets, then all
+food boxes, and finally boxes in neither category. Inside each category it
+starts from the heaviest boxes. Food positions supported directly by chemical
+boxes are preferred over unused floor space. Every direct supporter must be at
+least as heavy as the box placed above it, and every candidate is checked for
+containment, height, payload, non-overlap, configured support fraction, the
+chemical-below-food rule, and symmetry compatibility before it is submitted to
+Gurobi. Boxes in neither category are included in the last phase so the MIP
+start always covers the complete instance.
+
+The default objective is lexicographic: first minimize used pallets and then
+minimize the maximum occupied height. The independent `category_distance_only`
+mode instead minimizes distances between boxes with the same
+`retrieval_priority` (benchmark `priority`). For two same-category boxes on one
+pallet, their contribution is the L1 distance between their oriented box
+centers. If they are on different pallets, the contribution is the fixed
+penalty `pallet_length + pallet_width + pallet_height + 1`; different-category
+pairs contribute zero. Distances and the `1` epsilon are in grid units.
+`category_distance_then_max_height` first proves and fixes that minimum distance
+sum, then minimizes maximum occupied height without degrading the distance
+objective.
+
+The result visualization uses the priority category as the box hue. Distinct
+SKUs/types inside one priority category use lighter shades of the same hue;
+food and chemical boxes retain their `F` and `C` text labels.
+
+When support-area maximization is enabled, it follows the selected distance
+objective after fixing the proven distance optimum. In the default height mode,
+support area still follows fixed optimal pallet count and height. Pallet count
+and height are not optimized in `category_distance_only` mode.
 
 ## 7. Run from PyCharm
 

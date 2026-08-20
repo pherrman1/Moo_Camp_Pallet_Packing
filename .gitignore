@@ -27,3 +27,5 @@ assets/__generated_theme.css
 *.log
 *.synctex.gz
 /MILP_formulation.pdf
+
+*.html
