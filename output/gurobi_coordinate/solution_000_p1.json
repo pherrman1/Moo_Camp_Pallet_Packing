@@ -1,4 +1,5 @@
 {
+  "instance": "unknown",
   "formulation": "coordinate-based pairwise non-overlap MILP",
   "metrics": {
     "status": "OPTIMAL",
@@ -6,7 +7,7 @@
     "volume_utilization": 0.2638888888888889,
     "objective_bound": 1.0,
     "mip_gap": 0.0,
-    "runtime_seconds": 0.020323991775512695,
+    "runtime_seconds": 0.021514892578125,
     "grid_mm": 50
   },
   "placements": [
