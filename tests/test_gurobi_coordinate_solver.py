@@ -108,6 +108,7 @@ class TestReducedExactCoordinateMILP(unittest.TestCase):
             "rotation_mode": "yaw",
             "area_auxiliary_type": "integer",
             "stacking_mass_alpha": 1.2,
+            "objective_mode": "pallets_then_max_height",
             "support": {"mode": support_mode, "minimum_fraction": 0.75},
             "symmetry": {
                 "fix_first_item": False,
@@ -219,6 +220,66 @@ class TestReducedExactCoordinateMILP(unittest.TestCase):
             solution = exact.solve()
             self.assertEqual(solution.pallet_count, 2)
             audit_solution(solution, context, "off", 0.75, items, 1.2)
+        finally:
+            exact.model.dispose()
+
+    def test_lexicographic_height_never_uses_an_extra_pallet(self):
+        context = {
+            "pallet": {
+                "length": 1, "width": 1, "height": 2,
+                "length_mm": 50, "width_mm": 50, "height_mm": 100,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [self._item(0, (1, 1, 1), 5.0), self._item(1, (1, 1, 1), 5.0)]
+        config = {
+            "max_pallets": 2, "time_limit_seconds": 10, "mip_gap": 0.0,
+            "log_to_console": False, "rotation_mode": "none",
+            "area_auxiliary_type": "integer", "stacking_mass_alpha": 1.2,
+            "objective_mode": "pallets_then_max_height",
+            "support": {"mode": "full", "minimum_fraction": 0.75},
+            "symmetry": {"fix_first_item": False, "order_pallet_loads": False, "order_identical_items": False},
+        }
+        exact = ReducedExactCoordinateMILP(context, items, config)
+        try:
+            solution = exact.solve()
+            self.assertTrue(exact.secondary_optimized)
+            self.assertEqual(solution.pallet_count, 1)
+            self.assertEqual(solution.max_height_grid, 2)
+            self.assertTrue(solution.height_stage_attempted)
+            self.assertEqual(solution.height_objective_bound_grid, 2.0)
+            self.assertEqual(solution.height_mip_gap, 0.0)
+            self.assertIsNotNone(exact.model.getConstrByName("fix_lexicographic_pallet_count"))
+        finally:
+            exact.model.dispose()
+
+    def test_secondary_objective_minimizes_height_at_fixed_pallet_count(self):
+        context = {
+            "pallet": {
+                "length": 2, "width": 1, "height": 3,
+                "length_mm": 100, "width_mm": 50, "height_mm": 150,
+                "payload_kg": 1000.0,
+            },
+            "grid_mm": 50,
+        }
+        items = [self._item(0, (1, 1, 1), 5.0), self._item(1, (1, 1, 1), 5.0)]
+        config = {
+            "max_pallets": 1, "time_limit_seconds": 10, "mip_gap": 0.0,
+            "log_to_console": False, "rotation_mode": "none",
+            "area_auxiliary_type": "integer", "stacking_mass_alpha": 1.2,
+            "objective_mode": "pallets_then_max_height",
+            "support": {"mode": "off", "minimum_fraction": 0.75},
+            "symmetry": {"fix_first_item": False, "order_pallet_loads": False, "order_identical_items": False},
+        }
+        exact = ReducedExactCoordinateMILP(context, items, config)
+        try:
+            solution = exact.solve()
+            self.assertEqual(solution.pallet_count, 1)
+            self.assertEqual(solution.max_height_grid, 1)
+            self.assertTrue(solution.height_stage_attempted)
+            self.assertEqual(solution.height_objective_bound_grid, 1.0)
+            self.assertEqual(solution.height_mip_gap, 0.0)
         finally:
             exact.model.dispose()
 

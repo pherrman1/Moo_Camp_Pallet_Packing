@@ -80,6 +80,10 @@ class CoordinateSolution:
     mip_gap: float
     runtime_seconds: float
     placements: list[CoordinatePlacement]
+    max_height_grid: int = 0
+    height_objective_bound_grid: float | None = None
+    height_mip_gap: float | None = None
+    height_stage_attempted: bool = False
 
 
 def load_config(path: str | Path | None) -> dict[str, Any]:
@@ -330,7 +334,7 @@ class CoordinateBasedMILP:
         self._build_non_overlap_and_overlap_logic()
         self._build_support()
         self._build_symmetry_breaking()
-        self.model.setObjective(gp.quicksum(self.used[p] for p in self.P), GRB.MINIMIZE)
+        self._set_primary_objective()
         self.model.update()
 
     def _create_core_variables(self) -> None:
@@ -352,6 +356,9 @@ class CoordinateBasedMILP:
             (i, p): self.model.addVar(lb=0, ub=max_base[i], vtype=GRB.INTEGER, name=f"base[{i},{p}]")
             for i in self.I for p in self.P
         }
+        self.max_height = self.model.addVar(
+            lb=0, ub=H, vtype=GRB.INTEGER, name="maximum_packing_height"
+        )
 
     def length_expr(self, i: int, p: int):
         return gp.quicksum(self.orientations[i][o][0] * self.rotate[i, o, p] for o in self.O[i])
@@ -397,6 +404,10 @@ class CoordinateBasedMILP:
                         for o in self.O[i]
                     ),
                     name=f"oriented_base[{i},{p}]",
+                )
+                self.model.addConstr(
+                    self.max_height >= self.z_end[i, p],
+                    name=f"maximum_height_bound[{i},{p}]",
                 )
 
         for p in self.P:
@@ -802,8 +813,43 @@ class CoordinateBasedMILP:
             self.model.write(str(output))
             print(f"Wrote MILP: {output}")
 
-    def solve(self) -> CoordinateSolution:
+    def _set_primary_objective(self) -> None:
+        self.pallet_count_expr = gp.quicksum(self.used[p] for p in self.P)
+        self.model.setObjective(self.pallet_count_expr, GRB.MINIMIZE)
+
+    def _optimize_lexicographic(self) -> None:
+        """Optimize pallet count first, then height without degrading pallets."""
+        mode = str(self.config.get("objective_mode", "pallet_count_only"))
+        if mode not in {"pallet_count_only", "pallets_then_max_height"}:
+            raise ValueError("objective_mode must be pallet_count_only or pallets_then_max_height")
+        total_limit = float(self.config.get("time_limit_seconds", 300))
+        started = time.perf_counter()
+        self._set_primary_objective()
         self.model.optimize()
+        self.primary_objective_bound = float(self.model.ObjBound)
+        self.primary_mip_gap = float(self.model.MIPGap) if self.model.SolCount else math.inf
+        self.primary_pallet_count = (
+            int(round(sum(self.used[p].X for p in self.P))) if self.model.SolCount else None
+        )
+        self.secondary_optimized = False
+        self.secondary_objective_bound = None
+        self.secondary_mip_gap = None
+        if mode == "pallets_then_max_height" and self.model.SolCount and self.model.Status == GRB.OPTIMAL:
+            self.model.addConstr(
+                self.pallet_count_expr == self.primary_pallet_count,
+                name="fix_lexicographic_pallet_count",
+            )
+            remaining = max(1e-3, total_limit - (time.perf_counter() - started))
+            self.model.Params.TimeLimit = remaining
+            self.model.setObjective(self.max_height, GRB.MINIMIZE)
+            self.model.optimize()
+            self.secondary_optimized = True
+            self.secondary_objective_bound = float(self.model.ObjBound)
+            self.secondary_mip_gap = float(self.model.MIPGap) if self.model.SolCount else None
+        self.total_optimization_runtime = time.perf_counter() - started
+
+    def solve(self) -> CoordinateSolution:
+        self._optimize_lexicographic()
         if self.model.SolCount == 0:
             status = status_name(self.model.Status)
             raise RuntimeError(f"no feasible solution found; Gurobi status={status} ({self.model.Status})")
@@ -826,14 +872,17 @@ class CoordinateBasedMILP:
                     dz=dz,
                 )
             )
-        gap = float(self.model.MIPGap) if self.model.IsMIP else 0.0
         return CoordinateSolution(
             status=status_name(self.model.Status),
             pallet_count=int(round(sum(self.used[p].X for p in self.P))),
-            objective_bound=float(self.model.ObjBound),
-            mip_gap=gap,
-            runtime_seconds=float(self.model.Runtime),
+            objective_bound=self.primary_objective_bound,
+            mip_gap=self.primary_mip_gap,
+            runtime_seconds=self.total_optimization_runtime,
             placements=selected,
+            max_height_grid=max(placement.top for placement in selected),
+            height_objective_bound_grid=self.secondary_objective_bound,
+            height_mip_gap=self.secondary_mip_gap,
+            height_stage_attempted=self.secondary_optimized,
         )
 
 
@@ -883,7 +932,7 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         self._build_reduced_non_overlap()
         self._build_reduced_support()
         self._build_reduced_symmetry()
-        self.model.setObjective(gp.quicksum(self.used[p] for p in self.P), GRB.MINIMIZE)
+        self._set_primary_objective()
         self.model.update()
 
     def _create_reduced_variables(self) -> None:
@@ -900,6 +949,9 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         self.x_end = self.model.addVars(self.I, lb=0, ub=L, vtype=GRB.INTEGER, name="x_end")
         self.y_end = self.model.addVars(self.I, lb=0, ub=W, vtype=GRB.INTEGER, name="y_end")
         self.z_end = self.model.addVars(self.I, lb=0, ub=H, vtype=GRB.INTEGER, name="z_end")
+        self.max_height = self.model.addVar(
+            lb=0, ub=H, vtype=GRB.INTEGER, name="maximum_packing_height"
+        )
 
     def length_expr(self, i: int):
         return gp.quicksum(self.orientations[i][o][0] * self.rotate[i, o] for o in self.O[i])
@@ -926,6 +978,9 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
             self.model.addConstr(self.x_end[i] == self.x[i] + self.length_expr(i), name=f"right_edge[{i}]")
             self.model.addConstr(self.y_end[i] == self.y[i] + self.width_expr(i), name=f"front_edge[{i}]")
             self.model.addConstr(self.z_end[i] == self.z[i] + self.height_expr(i), name=f"top_edge[{i}]")
+            self.model.addConstr(
+                self.max_height >= self.z_end[i], name=f"maximum_height_bound[{i}]"
+            )
             for p in self.P:
                 self.model.addConstr(self.assign[i, p] <= self.used[p], name=f"activate[{i},{p}]")
 
@@ -1175,7 +1230,7 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
                     )
 
     def solve(self) -> CoordinateSolution:
-        self.model.optimize()
+        self._optimize_lexicographic()
         if self.model.SolCount == 0:
             status = status_name(self.model.Status)
             raise RuntimeError(f"no feasible solution found; Gurobi status={status} ({self.model.Status})")
@@ -1192,10 +1247,14 @@ class ReducedExactCoordinateMILP(CoordinateBasedMILP):
         return CoordinateSolution(
             status=status_name(self.model.Status),
             pallet_count=int(round(sum(self.used[p].X for p in self.P))),
-            objective_bound=float(self.model.ObjBound),
-            mip_gap=float(self.model.MIPGap),
-            runtime_seconds=float(self.model.Runtime),
+            objective_bound=self.primary_objective_bound,
+            mip_gap=self.primary_mip_gap,
+            runtime_seconds=self.total_optimization_runtime,
             placements=selected,
+            max_height_grid=max(placement.top for placement in selected),
+            height_objective_bound_grid=self.secondary_objective_bound,
+            height_mip_gap=self.secondary_mip_gap,
+            height_stage_attempted=self.secondary_optimized,
         )
 
 
@@ -1345,6 +1404,13 @@ def write_outputs(
         "metrics": {
             "status": solution.status,
             "pallet_count": solution.pallet_count,
+            "max_height_mm": solution.max_height_grid * context["grid_mm"],
+            "height_objective_bound_mm": (
+                solution.height_objective_bound_grid * context["grid_mm"]
+                if solution.height_objective_bound_grid is not None else None
+            ),
+            "height_mip_gap": solution.height_mip_gap,
+            "height_stage_attempted": solution.height_stage_attempted,
             "volume_utilization": total_volume / available_volume,
             "objective_bound": solution.objective_bound,
             "mip_gap": solution.mip_gap,
@@ -1359,11 +1425,19 @@ def write_outputs(
     (output_dir / f"{stem}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     with (output_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["status", "pallet_count", "volume_utilization", "objective_bound", "mip_gap", "runtime_seconds"])
+        writer.writerow([
+            "status", "pallet_count", "max_height_mm", "height_objective_bound_mm",
+            "height_mip_gap", "height_stage_attempted", "volume_utilization",
+            "objective_bound", "mip_gap", "runtime_seconds",
+        ])
         writer.writerow(
             [
                 solution.status,
                 solution.pallet_count,
+                payload["metrics"]["max_height_mm"],
+                payload["metrics"]["height_objective_bound_mm"],
+                solution.height_mip_gap,
+                solution.height_stage_attempted,
                 payload["metrics"]["volume_utilization"],
                 solution.objective_bound,
                 solution.mip_gap,
@@ -1450,6 +1524,10 @@ def write_batch_summary(records: list[dict[str, Any]], output_dir: Path) -> None
         "n_boxes",
         "max_pallets",
         "pallet_count",
+        "max_height_mm",
+        "height_objective_bound_mm",
+        "height_mip_gap",
+        "height_stage_attempted",
         "objective_bound",
         "mip_gap",
         "runtime_seconds",
@@ -1497,6 +1575,15 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 "n_boxes": len(items),
                 "max_pallets": int(config["max_pallets"]),
                 "pallet_count": solution.pallet_count,
+                "max_height_mm": solution.max_height_grid * context["grid_mm"],
+                "height_objective_bound_mm": (
+                    solution.height_objective_bound_grid * context["grid_mm"]
+                    if solution.height_objective_bound_grid is not None else ""
+                ),
+                "height_mip_gap": (
+                    solution.height_mip_gap if solution.height_mip_gap is not None else ""
+                ),
+                "height_stage_attempted": solution.height_stage_attempted,
                 "objective_bound": solution.objective_bound,
                 "mip_gap": solution.mip_gap,
                 "runtime_seconds": solution.runtime_seconds,
@@ -1505,9 +1592,15 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 "error_type": "",
                 "error": "",
             }
+            height_gap = (
+                f"{100 * solution.height_mip_gap:.3f}%"
+                if solution.height_mip_gap is not None else "n/a"
+            )
             print(
                 f"  {solution.status}: pallets={solution.pallet_count}, "
-                f"gap={100 * solution.mip_gap:.3f}%, runtime={solution.runtime_seconds:.2f}s"
+                f"primary_gap={100 * solution.mip_gap:.3f}%, "
+                f"height={solution.max_height_grid * context['grid_mm']} mm, "
+                f"height_gap={height_gap}, runtime={solution.runtime_seconds:.2f}s"
             )
         except Exception as exc:  # Continue so one difficult instance does not lose the batch report.
             failures += 1
@@ -1526,6 +1619,10 @@ def run_batch(args: argparse.Namespace, base_config: dict[str, Any]) -> int:
                 "n_boxes": "",
                 "max_pallets": int(config.get("max_pallets", 0)),
                 "pallet_count": "",
+                "max_height_mm": "",
+                "height_objective_bound_mm": "",
+                "height_mip_gap": "",
+                "height_stage_attempted": "",
                 "objective_bound": "",
                 "mip_gap": "",
                 "runtime_seconds": time.perf_counter() - started,
@@ -1568,7 +1665,7 @@ def main() -> int:
     input_path = Path(args.input)
     config = instance_config(base_config, input_path, args.time_limit, args.max_pallets)
     output_dir = Path(args.output_dir)
-    solution, _, _, _ = solve_instance(
+    solution, context, _, _ = solve_instance(
         input_path,
         config,
         output_dir,
@@ -1577,7 +1674,14 @@ def main() -> int:
     )
     print(
         f"Status={solution.status}; pallets={solution.pallet_count}; "
-        f"gap={100 * solution.mip_gap:.3f}%; runtime={solution.runtime_seconds:.2f}s"
+        f"primary_gap={100 * solution.mip_gap:.3f}%; "
+        f"max_height={solution.max_height_grid * context['grid_mm']} mm; "
+        f"height_gap="
+        + (
+            f"{100 * solution.height_mip_gap:.3f}%"
+            if solution.height_mip_gap is not None else "n/a"
+        )
+        + f"; runtime={solution.runtime_seconds:.2f}s"
     )
     print(f"Wrote {output_dir}")
     return 0

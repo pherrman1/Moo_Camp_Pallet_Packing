@@ -8,6 +8,7 @@
   "model_variant": "reduced_exact",
   "area_auxiliary_type": "integer",
   "stacking_mass_alpha": 1.2,
+  "objective_mode": "pallets_then_max_height",
   "visualization_unit": "cm",
   "rotation_mode": "yaw",
   "support": {

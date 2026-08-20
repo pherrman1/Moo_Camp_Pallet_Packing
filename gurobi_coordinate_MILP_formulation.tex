@@ -8,7 +8,7 @@
 \usepackage{lmodern}
 \usepackage[hidelinks]{hyperref}
 
-\title{The Coordinate-Based MILP Implemented in\\
+\title{The Reduced Exact Coordinate MILP Implemented in\\
 \texttt{gurobi\_coordinate\_solver.py}}
 \author{}
 \date{}
@@ -18,453 +18,547 @@
 \newcommand{\Orients}{\mathcal O}
 \newcommand{\Pairs}{\mathcal E}
 \newcommand{\OPairs}{\overrightarrow{\mathcal E}}
-\newcommand{\B}{\mathbb B}
+\newcommand{\B}{\{0,1\}}
 \newcommand{\Z}{\mathbb Z}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This document states the mixed-integer linear model constructed by
-\texttt{gurobi\_coordinate\_solver.py}.  Unlike the position-indexed model in
-\texttt{MILP\_formulation.tex}, it does not enumerate every possible placement.
-Each physical box receives an integer coordinate, a pallet assignment, and an
-orientation.  Pairwise direction variables enforce three-dimensional
-non-overlap.  Optional support constraints use the exact horizontal
-intersection area of two boxes.  The implemented objective is solely to
-minimize the number of used pallets.  The document first gives the default
-\texttt{legacy} formulation and then records the changes made by the selectable
-\texttt{reduced\_exact} formulation.
+This document states only the \texttt{ReducedExactCoordinateMILP} constructed
+by \texttt{gurobi\_coordinate\_solver.py}.  This is the model selected by
+\texttt{configs/gurobi\_coordinate\_default.json}.  Each physical box has one
+integer local coordinate and one orientation, while pallet assignment remains
+binary.  Pairwise direction variables prevent boxes assigned to the same
+pallet from overlapping.  Optional support constraints use exact horizontal
+intersection areas.  The implemented objective minimizes the number of used
+pallets.  All sets, parameters, variables, auxiliary linearizations, and their
+sources in the input or configuration are described below.
 \end{abstract}
 
-\section{Scope and source of the model}
+\section{Modeling idea}
 
-The solver reads an MCPP/PL-100 JSON instance and a JSON configuration file.
-The instance supplies the pallet and physical boxes.  The configuration
-supplies the spatial grid, maximum candidate-pallet count, rotation and support
-modes, symmetry options, and Gurobi stopping parameters.  All spatial
-quantities in the optimization model are integer numbers of grid cells.
+Every candidate pallet has the same dimensions and coordinate system.  A box
+is assigned to exactly one pallet, so it needs only one local position and one
+orientation.  It does not need a separate copy of its coordinates for every
+candidate pallet.  Geometry is therefore indexed by boxes and box pairs;
+pallet indices occur only in assignment, pallet activation, capacity, and the
+constraints that activate non-overlap for boxes sharing a pallet.
 
-The implementation currently uses box geometry and identity information, but
-does \emph{not} impose weight, food--chemical, fragility, or retrieval-priority
-constraints.  Those attributes are parsed, used in the key that recognizes
-identical boxes, and reproduced in solution files.  This distinction is
-important: their presence in the input does not mean they are active physical
-constraints in this coordinate model.
+The word \emph{exact} refers to this reduction: replacing pallet-indexed copies
+of identical local geometry by one state per box does not approximate the
+integer-grid packing problem.  Exactness remains relative to the configured
+grid, allowed orientations, maximum candidate-pallet count, and active
+constraints.  Section~\ref{sec:symmetry} records an important caveat concerning
+two optional pallet-label restrictions enabled together in the supplied
+configuration.
 
-\section{Input processing and primitive data}
+\section{Input data and preprocessing}
+
+\subsection{Sources}
+
+The model is built from two sources:
+\begin{enumerate}[leftmargin=*]
+ \item An MCPP/PL-100 JSON instance supplies the pallet and an \texttt{items}
+ or \texttt{boxes} array.
+ \item A JSON configuration supplies grid resolution, candidate-pallet and
+ item limits, rotation and support modes, symmetry options, Gurobi parameters,
+ and the type of area auxiliaries.  The supplied default configuration selects
+ \texttt{model\_variant = reduced\_exact} and
+ \texttt{area\_auxiliary\_type = integer}.
+\end{enumerate}
+
+The parser accepts several dimension-field schemas.  After normalization, let
+$(L^{\rm mm},W^{\rm mm},H^{\rm mm})$ denote the physical pallet dimensions and
+$(\ell_i^{\rm mm},w_i^{\rm mm},h_i^{\rm mm})$ the physical dimensions of box
+$i$.
 
 \subsection{Grid conversion}
 
-Let $g\in\Z_{>0}$ be \texttt{grid\_mm}.  It comes from the configuration,
-unless its value is the string \texttt{input}, in which case it comes from
-\texttt{meta.grid\_mm} in the instance (default 50 mm if absent).
-
-Let $(L^{\rm mm},W^{\rm mm},H^{\rm mm})$ be the pallet dimensions read from
-one of the accepted JSON schemas.  The model dimensions are conservatively
-floored:
+Let $g\in\Z_{>0}$ be the grid size in millimetres.  It is read from
+\texttt{grid\_mm}; if this value is the string \texttt{input}, it is read from
+\texttt{meta.grid\_mm} in the instance, with 50 mm as the parser fallback.
+Pallet dimensions are rounded down:
 \begin{equation}
- (L,W,H)=\left(
+ (L,W,H):=\left(
  \left\lfloor\frac{L^{\rm mm}}g\right\rfloor,
  \left\lfloor\frac{W^{\rm mm}}g\right\rfloor,
  \left\lfloor\frac{H^{\rm mm}}g\right\rfloor\right).
- \label{eq:pallet-rounding}
+ \label{eq:pallet-grid}
 \end{equation}
-For box $i$, let $(\ell_i^{\rm mm},w_i^{\rm mm},h_i^{\rm mm})$ be its
-dimensions after schema normalization.  Its unrotated grid dimensions are
-rounded upward:
+The unrotated dimensions of box $i$ are rounded upward:
 \begin{equation}
- (\ell_i,w_i,h_i)=\left(
+ (\ell_i,w_i,h_i):=\left(
  \max\left\{1,\left\lceil\frac{\ell_i^{\rm mm}}g\right\rceil\right\},
  \max\left\{1,\left\lceil\frac{w_i^{\rm mm}}g\right\rceil\right\},
  \max\left\{1,\left\lceil\frac{h_i^{\rm mm}}g\right\rceil\right\}\right).
- \label{eq:item-rounding}
+ \label{eq:box-grid}
 \end{equation}
-Flooring the container and ceiling the boxes makes the discretization
-conservative: a grid-feasible packing does not exceed the physical pallet
-boundary, apart from ordinary floating-point input tolerances used in parsing.
+This is conservative: the usable pallet is not enlarged and the boxes are not
+shrunk.  A feasible integer-grid packing therefore remains within the physical
+pallet boundary, subject to the small numerical tolerances used while parsing.
 
 \subsection{Sets and indices}
 
+Let $n$ be the number of records in the instance.  Model construction requires
+$1\le n\le n^{\max}$, where $n^{\max}$ is the configuration value
+\texttt{max\_items}.  This is a preprocessing guard, not a MILP constraint.
+Define
 \begin{align}
- \Items&:=\{0,\ldots,n-1\}, && i,j\in\Items,\\
- \Pallets&:=\{0,\ldots,P^{\max}-1\}, && p\in\Pallets,\\
- \Pairs&:=\{(i,j)\in\Items^2:i<j\},\\
- \OPairs&:=\{(i,j)\in\Items^2:i\ne j\}.
+ \Items&:=\{0,\ldots,n-1\}, && i,j\in\Items,\label{eq:items}\\
+ \Pallets&:=\{0,\ldots,P^{\max}-1\}, && p\in\Pallets,\label{eq:pallets}\\
+ \Pairs&:=\{(i,j)\in\Items^2:i<j\},\label{eq:pairs}\\
+ \OPairs&:=\{(i,j)\in\Items^2:i\ne j\}.\label{eq:ordered-pairs}
 \end{align}
-Here $n$ is the number of records in the instance's \texttt{items} or
-\texttt{boxes} array.  $P^{\max}$ is \texttt{max\_pallets}; for batch solves
-it can be raised to a benchmark-provided pallet upper bound.  Candidate
-pallets are identical and their indices have no physical meaning.
 
-For each $i$, preprocessing constructs a list of distinct permitted oriented
-dimension triples
-\begin{equation}
- \Orients_i=\{0,\ldots,m_i-1\},\qquad
- (d^x_{io},d^y_{io},d^z_{io})\in\Z_{>0}^3.
-\end{equation}
-The list comes from \texttt{rotation\_mode}:
+The candidate-pallet count $P^{\max}$ is determined before model construction:
+an explicit command-line \texttt{--max-pallets} value takes precedence.  If it
+is absent, the code takes the maximum of the configured value and an available
+instance recommendation.  That recommendation is read from
+\texttt{meta.bounds.ub\_pallets\_heuristic}, or otherwise from the last entry
+of \texttt{meta.bounds.certified\_optimum\_in}.  Candidate pallets are
+physically identical; their labels have no physical meaning.
+
+For each $i\in\Items$, preprocessing first generates distinct orientation
+triples.  The configuration value \texttt{rotation\_mode} has the following
+meaning:
 \begin{description}[leftmargin=2.8cm,style=nextline]
  \item[\texttt{none}] only $(\ell_i,w_i,h_i)$;
- \item[\texttt{yaw}] the original orientation and a swap of the horizontal
- axes;
- \item[\texttt{metadata}] the same yaw-only rule (and thus no extra behavior
- beyond \texttt{yaw} in the current code);
- \item[\texttt{six}] all distinct axis permutations, except that a box with
- \texttt{upright\_only=true} is still restricted to yaw rotations.
+ \item[\texttt{yaw}] $(\ell_i,w_i,h_i)$ and $(w_i,\ell_i,h_i)$;
+ \item[\texttt{metadata}] the same yaw-only behavior in the current code;
+ \item[\texttt{six}] all distinct permutations of the three dimensions.
 \end{description}
-Repeated triples caused by equal side lengths are removed while preserving
-their first occurrence.
+If \texttt{upright\_only} is true, only the two yaw orientations are allowed
+even in \texttt{six} mode.  Duplicate triples caused by equal side lengths are
+removed.  The reduced model then removes every orientation that does not fit
+inside $(L,W,H)$.  The resulting set and its fixed dimensions are
+\begin{equation}
+ \Orients_i:=\{0,\ldots,m_i-1\},\qquad
+ (d^x_{io},d^y_{io},d^z_{io})\in\Z_{>0}^3,quad o\in\Orients_i.
+ \label{eq:orientations}
+\end{equation}
+Every retained triple satisfies $d^x_{io}\le L$, $d^y_{io}\le W$, and
+$d^z_{io}\le H$.  An item with no retained orientation is rejected before the
+MILP is built.  The current exception path contains a minor implementation bug:
+it refers to \texttt{item\_id}, whereas the data class field is \texttt{id}.
 
-\subsection{Parameters and their provenance}
+\subsection{Parameters used by the MILP}
 
-\begin{longtable}{@{}p{2.5cm}p{3cm}p{8.2cm}@{}}
+\begin{longtable}{@{}p{2.4cm}p{3.2cm}p{8cm}@{}}
 \toprule
-Symbol & Code/input source & Meaning and use \\
+Symbol & Source & Meaning \\
 \midrule
 \endhead
-$L,W,H$ & instance pallet; Eq.~\eqref{eq:pallet-rounding} & pallet extents in grid cells and big-$M$ constants for the three axes.\\
-$P^{\max}$ & config \texttt{max\_pallets} & number of identical candidate pallets.\\
-$d^a_{io}$ & item dimensions, grid, rotation mode & oriented extent of box $i$ on axis $a\in\{x,y,z\}$.\\
-$v_i$ & $\ell_iw_ih_i$ & conservative grid-cell volume.  Rotation does not change it.\\
+$L,W,H$ & instance and Eq.~\eqref{eq:pallet-grid} & pallet extents in integer grid cells; also axis-specific big-$M$ constants.\\
+$P^{\max}$ & CLI, config, and possibly instance bounds & number of identical candidate pallets.\\
+$d^a_{io}$ & instance dimensions, grid, rotation mode & extent of box $i$ on axis $a\in\{x,y,z\}$ in orientation $o$.\\
+$v_i$ & $\ell_iw_ih_i$ & conservative box volume in grid cells; invariant under rotation.\\
 $V$ & $LWH$ & pallet volume in grid cells.\\
-$\alpha$ & \texttt{support.minimum\_fraction} & minimum supported base fraction in \texttt{fraction} mode; default $0.75$.\\
-$(r,s)$ & rational approximation of $\alpha=r/s$ & numerator and denominator, each produced with denominator at most 1000, used to avoid a fractional coefficient in the support row.\\
-$\bar A_i$ & $\max_{o\in\Orients_i}d^x_{io}d^y_{io}$ & largest possible base area of box $i$.\\
-$A^{\max}$ & $LW$ & safe upper bound in support-area linearizations.\\
 $K^{\rm vol}$ & $\max\{1,\lceil\sum_i v_i/V\rceil\}$ & volume lower bound on the number of pallets.\\
-$M^{\rm loc}$ & $L(W+1)(H+1)+W(H+1)+H$ & big-$M$ for lexicographic position ordering of identical boxes.\\
+$\bar q^x_{ij}$ & $\min\{\max_o d^x_{io},\max_o d^x_{jo}\}$ & pair-specific upper bound on horizontal overlap length in $x$.\\
+$\bar q^y_{ij}$ & $\min\{\max_o d^y_{io},\max_o d^y_{jo}\}$ & pair-specific upper bound on horizontal overlap length in $y$.\\
+$A^{\max}$ & $LW$ & safe global upper bound for contact-gating a footprint area.\\
+$\bar A_j$ & $\max_o d^x_{jo}d^y_{jo}$ & maximum possible base area of box $j$.\\
+$\widetilde\alpha=r/s$ & support configuration & rationalized required support fraction, with denominator at most 1000.\\
+$M^{\rm loc}$ & $L(W+1)(H+1)+W(H+1)+H$ & big-$M$ for position ordering of identical boxes.\\
 \bottomrule
 \end{longtable}
 
-The instance also supplies box ID, SKU, weight, volume in dm$^3$, family,
-food flag, chemical flag, fragile flag, upright-only flag, and retrieval
-priority.  ID and the original millimetre dimensions are reporting fields.
-SKU, grid dimensions, weight, family, the three handling flags, upright-only,
-and priority form the identical-item grouping key.  Of these, only dimensions
-and upright-only status otherwise affect the current optimization model.
+If \texttt{support.mode = full}, then $\widetilde\alpha=1$.  In
+\texttt{fraction} mode, the code converts the configured floating-point value
+$\alpha$ to a decimal string and applies a denominator-limited rational
+approximation:
+\begin{equation}
+ \widetilde\alpha:=
+ \operatorname{limitDenominator}_{1000}
+ \bigl(\operatorname{Fraction}(\operatorname{str}(\alpha))\bigr)
+ =\frac rs.
+ \label{eq:rational-alpha}
+\end{equation}
+Thus the MILP enforces $\widetilde\alpha$, which need not equal an arbitrary
+configured $\alpha$.  The supplied value $0.75=3/4$ is represented exactly.
+The post-solve geometry audit instead checks the original floating-point value.
 
-\section{Default (\texttt{legacy}) decision variables}
+\subsection{Parsed attributes not used as physical constraints}
 
-The legacy formulation stores a separate local geometric state for every
-box--pallet combination.  Variables belonging to an unassigned combination
-are forced to zero by the boundary equations.
+The parser reads or defaults the following additional item fields: ID, SKU,
+original millimetre dimensions, weight, \texttt{volume\_dm3}, family, food,
+chemical, fragile, upright-only, and retrieval priority.  ID and SKU default
+from the record index; weight defaults to 1 kg; family and the food/chemical
+flags may be inferred from \texttt{group}; the Boolean handling flags default
+to false; priority falls back from \texttt{retrieval\_priority} to
+\texttt{priority} and then to 1.
 
-\begin{longtable}{@{}p{2.3cm}p{2.8cm}p{2.5cm}p{6.8cm}@{}}
+The optimization volume is $v_i=\ell_iw_ih_i$, not the parsed
+\texttt{volume\_dm3}.  Weight, food/chemical status, fragility, family, and
+retrieval priority do not impose payload, compatibility, accessibility, or
+handling constraints in this solver.  Some of them are used only in the
+identical-item key in Section~\ref{sec:symmetry}; the fields are otherwise
+retained for output and future extensions.
+
+\section{Decision variables}
+
+\subsection{Core variables}
+
+\begin{longtable}{@{}p{2.2cm}p{3.3cm}p{2.4cm}p{6.6cm}@{}}
 \toprule
 Variable & Index & Domain & Meaning \\
 \midrule
 \endhead
 $u_p$ & $p\in\Pallets$ & $\B$ & 1 iff candidate pallet $p$ is used.\\
 $a_{ip}$ & $i\in\Items,p\in\Pallets$ & $\B$ & 1 iff box $i$ is assigned to pallet $p$.\\
-$r_{iop}$ & $i,p,o\in\Orients_i$ & $\B$ & 1 iff $i$ is on $p$ with orientation $o$.\\
-$x_{ip},y_{ip},z_{ip}$ & $i,p$ & integer, respectively $[0,L],[0,W],[0,H]$ & lower-left-bottom coordinates.\\
-$\bar x_{ip},\bar y_{ip},\bar z_{ip}$ & $i,p$ & integer, same bounds & right, front, and top coordinates.\\
-$b_{ip}$ & $i,p$ & $\Z_{\ge0}$ & oriented base area; zero if unassigned.\\
-$\lambda^x_{ijp}$ & $(i,j)\in\OPairs,p$ & $\B$ & 1 exactly when $i$ ends at or before $j$ starts on $x$.\\
-$\lambda^y_{ijp}$ & $(i,j)\in\OPairs,p$ & $\B$ & analogous ``in front of'' relation on $y$.\\
-$\lambda^z_{ijp}$ & $(i,j)\in\OPairs,p$ & $\B$ & analogous ``below'' relation on $z$.\\
-$o^x_{ijp},o^y_{ijp}$ & $(i,j)\in\Pairs,p$ & $\B$ & 1 iff assigned boxes overlap strictly on the named horizontal axis.\\
-$o^{xy}_{ijp}$ & $(i,j)\in\Pairs,p$ & $\B$ & logical AND $o^x_{ijp}\land o^y_{ijp}$.\\
-$f_{jp}$ & $j,p$ & $\B$ & 1 iff assigned box $j$ is on the floor.\\
-$c_{ijp}$ & $(i,j)\in\OPairs,p$ & $\B$ & 1 may certify that $i$ directly supports $j$.\\
-$q^x_{ijp},q^y_{ijp}$ & $(i,j)\in\Pairs,p$ & integer & exact horizontal overlap lengths when area support is active.\\
-$A_{ijp}$ & $(i,j)\in\Pairs,p$ & continuous or integer & exact footprint-intersection area.\\
-$S_{ijp}$ & $(i,j)\in\OPairs,p$ & continuous or integer & $A_{\min\{i,j\},\max\{i,j\},p}$ when $c_{ijp}=1$, and zero otherwise.\\
+$r_{io}$ & $i\in\Items,o\in\Orients_i$ & $\B$ & 1 iff orientation $o$ is selected for box $i$.\\
+$x_i,y_i,z_i$ & $i\in\Items$ & respectively $\Z\cap[0,L]$, $\Z\cap[0,W]$, $\Z\cap[0,H]$ & local lower-left-bottom coordinates.\\
+$\bar x_i,\bar y_i,\bar z_i$ & $i\in\Items$ & same respective integer bounds & right, front, and top coordinates.\\
+$\lambda^x_{ij}$ & $(i,j)\in\OPairs$ & $\B$ & 1 iff box $i$ ends at or before box $j$ starts on $x$.\\
+$\lambda^y_{ij}$ & $(i,j)\in\OPairs$ & $\B$ & analogous relation on $y$ (``in front of'').\\
+$\lambda^z_{ij}$ & $(i,j)\in\OPairs$ & $\B$ & analogous relation on $z$ (``below'').\\
+$f_j$ & $j\in\Items$ & $\B$ & 1 iff box $j$ rests on the pallet floor.\\
+$c_{ij}$ & $(i,j)\in\OPairs$ & $\B$ & 1 when box $i$ is selected as a direct supporter of box $j$.\\
+$S_{ij}$ & $(i,j)\in\OPairs$ & $\Z_{\ge0}$ by supplied config & footprint area of the pair counted as support from $i$ to $j$.\\
 \bottomrule
 \end{longtable}
 
-The area auxiliaries are continuous by default in the legacy model, although
-their defining equations give integral values at integer coordinates.  Setting
-\texttt{area\_auxiliary\_type} to \texttt{integer} declares them integral.
+The support variables $f_j,c_{ij},S_{ij}$ exist only in the modes described in
+Section~\ref{sec:support}.  The reduced model has no separate base-area
+variable.  Its oriented base area is the linear expression
+\begin{equation}
+ B_i:=\sum_{o\in\Orients_i}d^x_{io}d^y_{io}r_{io}.
+ \label{eq:base-expression}
+\end{equation}
 
-Define the following convenient linear expressions:
-\begin{align}
- D^x_{ip}&:=\sum_{o\in\Orients_i}d^x_{io}r_{iop},&
- D^y_{ip}&:=\sum_{o\in\Orients_i}d^y_{io}r_{iop},&
- D^z_{ip}&:=\sum_{o\in\Orients_i}d^z_{io}r_{iop}.
-\end{align}
+\subsection{Auxiliaries for horizontal overlap area}
+
+In \texttt{fraction} and \texttt{full} support modes, every unordered pair
+$(i,j)\in\Pairs$ receives the following variables.  These are always created
+by the reduced model.  The configuration option
+\texttt{overlap\_formulation} is not read by this formulation.
+
+\begin{longtable}{@{}p{2.8cm}p{2.7cm}p{2.8cm}p{6.2cm}@{}}
+\toprule
+Variable & Index & Domain & Meaning \\
+\midrule
+\endhead
+$m^x_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,L]$ & $\min\{\bar x_i,\bar x_j\}$.\\
+$M^x_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,L]$ & $\max\{x_i,x_j\}$.\\
+$\delta^x_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[-L,L]$ & signed difference $m^x_{ij}-M^x_{ij}$.\\
+$q^x_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,L]$ & exact positive overlap length $\max\{0,\delta^x_{ij}\}$.\\
+$m^y_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,W]$ & $\min\{\bar y_i,\bar y_j\}$.\\
+$M^y_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,W]$ & $\max\{y_i,y_j\}$.\\
+$\delta^y_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[-W,W]$ & signed difference $m^y_{ij}-M^y_{ij}$.\\
+$q^y_{ij}$ & $(i,j)\in\Pairs$ & $\Z\cap[0,W]$ & exact positive overlap length $\max\{0,\delta^y_{ij}\}$.\\
+$\beta_{ijk}$ & $(i,j)\in\Pairs$, bit $k$ & $\B$ & binary expansion of one chosen overlap length.\\
+$t_{ijk}$ & same & $\Z_{\ge0}$ by supplied config & product of bit $\beta_{ijk}$ and the other overlap length.\\
+$A_{ij}$ & $(i,j)\in\Pairs$ & $\Z_{\ge0}$ by supplied config & exact footprint-intersection area $q^x_{ij}q^y_{ij}$.\\
+\bottomrule
+\end{longtable}
+
+If \texttt{area\_auxiliary\_type = continuous}, $t_{ijk}$, $A_{ij}$, and
+$S_{ij}$ are continuous instead.  The supplied configuration declares them
+integer.  The reduced class also uses integer as its fallback if the option is
+omitted.
 
 \section{Objective}
 
-The single implemented optimization criterion is
+The only optimization objective inserted into Gurobi is
 \begin{equation}
- \min\quad \sum_{p\in\Pallets}u_p.
+ \min\quad\sum_{p\in\Pallets}u_p.
  \label{eq:objective}
 \end{equation}
-Weight, center of mass, accessibility, family separation, and similar project
-attributes do not appear in this objective.
+It minimizes the number of used pallets.  No weight, center-of-mass,
+accessibility, compatibility, or height objective is present.
 
 \section{Assignment, orientation, and containment}
 
-Each physical box is assigned once, and it has one orientation precisely on
-its assigned pallet:
+Each box is assigned to exactly one pallet and receives exactly one retained
+orientation:
 \begin{align}
  \sum_{p\in\Pallets}a_{ip}&=1 &&\forall i\in\Items,\label{eq:assign-once}\\
- \sum_{o\in\Orients_i}r_{iop}&=a_{ip}
- &&\forall i\in\Items,\ p\in\Pallets.\label{eq:one-orientation}
+ \sum_{o\in\Orients_i}r_{io}&=1 &&\forall i\in\Items.\label{eq:orient-once}
 \end{align}
-Assignment activates a pallet, and activation is exact:
+Assignment activates a pallet, and a pallet may not be marked used without a
+box:
 \begin{align}
- a_{ip}&\le u_p &&\forall i,p,\label{eq:activate}\\
- u_p&\le\sum_{i\in\Items}a_{ip} &&\forall p.\label{eq:used-has-box}
+ a_{ip}&\le u_p &&\forall i\in\Items,p\in\Pallets,\label{eq:activate}\\
+ u_p&\le\sum_{i\in\Items}a_{ip} &&\forall p\in\Pallets.\label{eq:used-box}
 \end{align}
 
-The endpoint variables are defined by
-\begin{align}
- \bar x_{ip}&=x_{ip}+D^x_{ip},&
- \bar y_{ip}&=y_{ip}+D^y_{ip},&
- \bar z_{ip}&=z_{ip}+D^z_{ip},\label{eq:endpoints}\\
- b_{ip}&=\sum_{o\in\Orients_i}d^x_{io}d^y_{io}r_{iop}.
- \label{eq:base-area}
-\end{align}
-Containment and the zeroing of inactive local states follow from
+Define the oriented dimensions as linear expressions
 \begin{equation}
- \bar x_{ip}\le La_{ip},\qquad
- \bar y_{ip}\le Wa_{ip},\qquad
- \bar z_{ip}\le Ha_{ip}
- \qquad\forall i,p.
- \label{eq:containment}
+ D_i^a:=\sum_{o\in\Orients_i}d^a_{io}r_{io}
+ \qquad a\in\{x,y,z\}.
+ \label{eq:oriented-dimensions}
 \end{equation}
-
-The volume inequalities are valid but not sufficient packing conditions:
+The endpoints are
 \begin{align}
- \sum_{i\in\Items}v_i a_{ip}&\le Vu_p &&\forall p,\label{eq:volume-capacity}\\
- \sum_{p\in\Pallets}u_p&\ge K^{\rm vol}.\label{eq:volume-lb}
+ \bar x_i&=x_i+D_i^x,& \bar x_i&\le L,\label{eq:x-bound}\\
+ \bar y_i&=y_i+D_i^y,& \bar y_i&\le W,\label{eq:y-bound}\\
+ \bar z_i&=z_i+D_i^z,& \bar z_i&\le H
+ &&\forall i\in\Items.\label{eq:z-bound}
 \end{align}
-In addition, the implementation fixes $u_p=1$ for
-$p=0,\ldots,K^{\rm vol}-1$.  This is valid because pallet labels are
-interchangeable and used pallets are ordered as a prefix.
+Together with nonnegative coordinates, these constraints keep every oriented
+box inside its assigned pallet's local coordinate system.
+
+The following volume inequality is a valid strengthening for each pallet:
+\begin{equation}
+ \sum_{i\in\Items}v_i a_{ip}\le Vu_p
+ \qquad\forall p\in\Pallets.
+ \label{eq:volume-capacity}
+\end{equation}
+If $K^{\rm vol}>P^{\max}$, the solver rejects the instance before completing
+the model.  Otherwise, the reduced implementation fixes
+\begin{equation}
+ u_p=1\qquad p=0,\ldots,K^{\rm vol}-1.
+ \label{eq:fixed-volume-prefix}
+\end{equation}
+It does not insert a separate, redundant aggregate row
+$\sum_pu_p\ge K^{\rm vol}$.
 
 \section{Pairwise non-overlap}
 
-For every ordered pair and pallet, forward big-$M$ inequalities give the
-meaning of the direction variables:
+The direction variables describe exact interval separation.  For every
+ordered pair $(i,j)\in\OPairs$,
 \begin{align}
- \bar x_{ip}&\le x_{jp}+L(1-\lambda^x_{ijp}),\label{eq:left-forward}\\
- \bar y_{ip}&\le y_{jp}+W(1-\lambda^y_{ijp}),\\
- \bar z_{ip}&\le z_{jp}+H(1-\lambda^z_{ijp}).
+ \bar x_i&\le x_j+L(1-\lambda^x_{ij}),&
+ x_j&\le\bar x_i-1+L\lambda^x_{ij},\label{eq:x-direction}\\
+ \bar y_i&\le y_j+W(1-\lambda^y_{ij}),&
+ y_j&\le\bar y_i-1+W\lambda^y_{ij},\label{eq:y-direction}\\
+ \bar z_i&\le z_j+H(1-\lambda^z_{ij}),&
+ z_j&\le\bar z_i-1+H\lambda^z_{ij}.
+ \label{eq:z-direction}
 \end{align}
-They can be 1 only for two boxes assigned to that pallet:
+Because the coordinates are integer, these paired inequalities imply, for
+example,
 \begin{equation}
- \lambda^a_{ijp}\le a_{ip},\qquad \lambda^a_{ijp}\le a_{jp}
- \quad\forall(i,j)\in\OPairs,p,\ a\in\{x,y,z\}.
- \label{eq:direction-activation}
+ \lambda^x_{ij}=1\quad\Longleftrightarrow\quad \bar x_i\le x_j.
 \end{equation}
-The reverse inequalities make each binary an exact strict-separation
-indicator at integer coordinates.  For example,
-\begin{equation}
- x_{jp}\le \bar x_{ip}-1
- +L\bigl(\lambda^x_{ijp}+2-a_{ip}-a_{jp}\bigr),
- \label{eq:left-reverse}
-\end{equation}
-with analogous inequalities on $y$ and $z$.  If both boxes are assigned and
-$\lambda^x_{ijp}=0$, Eq.~\eqref{eq:left-reverse} says
-$x_{jp}\le\bar x_{ip}-1$, i.e., the two integer intervals overlap strictly or
-$j$ lies to the left.  The one-cell term is the discrete analogue of a strict
-inequality.
+If the relation is false, $x_j\le\bar x_i-1$, so the two $x$ intervals overlap
+strictly or box $j$ lies completely to the left.  Touching faces count as
+separation, as required for non-overlap.
 
-Two boxes assigned to the same pallet must be separated on at least one axis:
-\begin{equation}
-\begin{aligned}
- &\lambda^x_{ijp}+\lambda^x_{jip}
- +\lambda^y_{ijp}+\lambda^y_{jip}
- +\lambda^z_{ijp}+\lambda^z_{jip}\\
- &\hspace{3cm}\ge a_{ip}+a_{jp}-1
+For each unordered pair, at least one of the six separating directions must
+hold whenever the boxes share any candidate pallet:
+\begin{align}
+ &\lambda^x_{ij}+\lambda^x_{ji}
+ +\lambda^y_{ij}+\lambda^y_{ji}
+ +\lambda^z_{ij}+\lambda^z_{ji}\nonumber\\
+ &\hspace{2cm}\ge a_{ip}+a_{jp}-1
  \qquad\forall(i,j)\in\Pairs,\ p\in\Pallets.
-\end{aligned}
-\label{eq:nonoverlap}
-\end{equation}
-
-The horizontal overlap indicators used by support are defined by the standard
-binary AND logic
-\begin{align}
- o^x_{ijp}&\le a_{ip},a_{jp},1-\lambda^x_{ijp},1-\lambda^x_{jip},\nonumber\\
- o^x_{ijp}&\ge a_{ip}+a_{jp}-1-\lambda^x_{ijp}-\lambda^x_{jip},\label{eq:overlap-x}\\
- o^y_{ijp}&\le a_{ip},a_{jp},1-\lambda^y_{ijp},1-\lambda^y_{jip},\nonumber\\
- o^y_{ijp}&\ge a_{ip}+a_{jp}-1-\lambda^y_{ijp}-\lambda^y_{jip},\label{eq:overlap-y}\\
- o^{xy}_{ijp}&\le o^x_{ijp},\quad o^{xy}_{ijp}\le o^y_{ijp},\quad
- o^{xy}_{ijp}\ge o^x_{ijp}+o^y_{ijp}-1.
- \label{eq:overlap-xy}
+ \label{eq:nonoverlap}
 \end{align}
-Comma-separated upper bounds in Eqs.~\eqref{eq:overlap-x}--\eqref{eq:overlap-y}
-denote one inequality for each listed right-hand side.
+If $i$ and $j$ are assigned to different pallets, every right-hand side is at
+most zero and their local coordinates need not be separated.  If they share
+pallet $p$, the right-hand side is one, which prevents volumetric overlap.
 
-\section{Support modes}
+\section{Support constraints}
+\label{sec:support}
 
-Support is selected by \texttt{support.mode}.  In \texttt{off} mode, none of
-the variables or constraints in this section are created.  Otherwise the floor
-indicator is defined by
-\begin{align}
- f_{jp}&\le a_{jp},& z_{jp}&\le H(1-f_{jp}),&
- z_{jp}&\ge a_{jp}-f_{jp}.
- \label{eq:floor}
-\end{align}
-Thus, for an assigned box, $f_{jp}=1$ exactly at $z_{jp}=0$.
+The configuration selects one of four modes: \texttt{off}, \texttt{direct},
+\texttt{fraction}, or \texttt{full}.  In \texttt{off} mode, no variables or
+constraints from this section are created.
 
-A possible direct-support certificate satisfies
-\begin{align}
- c_{ijp}&\le a_{ip},a_{jp},\lambda^z_{ijp},
- o^{xy}_{\min\{i,j\},\max\{i,j\},p},\label{eq:contact-bounds}\\
- z_{jp}-\bar z_{ip}&\le H(1-c_{ijp}),\qquad
- \bar z_{ip}-z_{jp}\le H(1-c_{ijp}).
- \label{eq:contact-height}
-\end{align}
-Consequently, $c_{ijp}=1$ implies same-pallet assignment, positive footprint
-overlap, $i$ below $j$, and exact vertical contact $\bar z_{ip}=z_{jp}$.
-The converse need not be forced, but the support requirement forces enough
-valid certificates to cover every raised box.
+\subsection{Floor and direct-contact logic}
 
-\subsection{Direct support}
-
-In \texttt{direct} mode, any positive horizontal overlap with at least one
-directly touching box is sufficient:
+For every box $j$, the floor indicator is exact:
 \begin{equation}
- f_{jp}+\sum_{i\in\Items\setminus\{j\}}c_{ijp}\ge a_{jp}
- \qquad\forall j,p.
+ z_j\le H(1-f_j),\qquad z_j\ge1-f_j.
+ \label{eq:floor}
+\end{equation}
+Thus $f_j=1$ iff $z_j=0$.
+
+For every ordered pair $(i,j)\in\OPairs$, contact may be selected only when the
+two boxes have the same pallet assignment.  The code imposes, for every pallet,
+\begin{equation}
+ c_{ij}\le1-a_{ip}+a_{jp},\qquad
+ c_{ij}\le1+a_{ip}-a_{jp}
+ \qquad\forall p\in\Pallets.
+ \label{eq:same-pallet-contact}
+\end{equation}
+Because each assignment vector contains exactly one 1, these inequalities
+force $c_{ij}=0$ when the boxes are on different pallets.  Exact vertical
+contact is activated by
+\begin{equation}
+ z_j-\bar z_i\le H(1-c_{ij}),\qquad
+ \bar z_i-z_j\le H(1-c_{ij}).
+ \label{eq:vertical-contact}
+\end{equation}
+Hence $c_{ij}=1$ implies $\bar z_i=z_j$: box $i$ touches the bottom of box $j$.
+
+\subsection{Direct support mode}
+
+In direct mode, binary overlap indicators $o^x_{ij},o^y_{ij}\in\B$ are
+created for $(i,j)\in\Pairs$:
+\begin{align}
+ o^x_{ij}&\le1-\lambda^x_{ij},&
+ o^x_{ij}&\le1-\lambda^x_{ji},&
+ o^x_{ij}&\ge1-\lambda^x_{ij}-\lambda^x_{ji},\label{eq:direct-overlap-x}\\
+ o^y_{ij}&\le1-\lambda^y_{ij},&
+ o^y_{ij}&\le1-\lambda^y_{ji},&
+ o^y_{ij}&\ge1-\lambda^y_{ij}-\lambda^y_{ji}.
+ \label{eq:direct-overlap-y}
+\end{align}
+These are exact indicators of strictly positive overlap on the two horizontal
+axes.  Contact is gated by
+\begin{equation}
+ c_{ij}\le o^x_{\min\{i,j\},\max\{i,j\}},\qquad
+ c_{ij}\le o^y_{\min\{i,j\},\max\{i,j\}}.
+ \label{eq:direct-contact-overlap}
+\end{equation}
+Every box must then be on the floor or have at least one direct supporter with
+positive footprint overlap:
+\begin{equation}
+ f_j+\sum_{i\in\Items\setminus\{j\}}c_{ij}\ge1
+ \qquad\forall j\in\Items.
  \label{eq:direct-support}
 \end{equation}
+The size of the positive overlap does not matter in this mode.
 
-\subsection{Fractional and full support}
+\subsection{Fractional and full support modes}
 
-In \texttt{fraction} and \texttt{full} modes, the exact rectangle-intersection
-lengths are
+In fraction and full modes, the reduced formulation computes the exact
+horizontal rectangle intersection for every $(i,j)\in\Pairs$.  Gurobi general
+constraints implement
 \begin{align}
- q^x_{ijp}&=\max\{0,\min(\bar x_{ip},\bar x_{jp})-
-                         \max(x_{ip},x_{jp})\},\label{eq:qx}\\
- q^y_{ijp}&=\max\{0,\min(\bar y_{ip},\bar y_{jp})-
-                         \max(y_{ip},y_{jp})\},\label{eq:qy}\\
- A_{ijp}&=q^x_{ijp}q^y_{ijp}.
- \label{eq:area-product}
+ m^x_{ij}&=\min\{\bar x_i,\bar x_j\},&
+ M^x_{ij}&=\max\{x_i,x_j\},\nonumber\\
+ \delta^x_{ij}&=m^x_{ij}-M^x_{ij},&
+ q^x_{ij}&=\max\{0,\delta^x_{ij}\},\label{eq:x-overlap-length}\\
+ m^y_{ij}&=\min\{\bar y_i,\bar y_j\},&
+ M^y_{ij}&=\max\{y_i,y_j\},\nonumber\\
+ \delta^y_{ij}&=m^y_{ij}-M^y_{ij},&
+ q^y_{ij}&=\max\{0,\delta^y_{ij}\}.
+ \label{eq:y-overlap-length}
 \end{align}
-The minima and maxima are inserted as Gurobi general constraints.  The product
-in Eq.~\eqref{eq:area-product} is linearized exactly.  In the default
-\texttt{compact} formulation, one overlap length is represented in binary,
-$q^x=\sum_k2^k\beta_k$, each product $\beta_kq^y$ receives the usual three
-linear inequalities, and $A=\sum_k2^k(\beta_kq^y)$.  Configuration alternatives
-\texttt{lookup\_1d} and \texttt{lookup\_2d} enumerate feasible orientation and
-relative-offset states but produce the same exact overlap area.
-
-The area counted as support is the contact-gated value
-\begin{align}
- 0\le S_{ijp}&\le A_{\min\{i,j\},\max\{i,j\},p},\nonumber\\
- S_{ijp}&\le A^{\max}c_{ijp},\nonumber\\
- S_{ijp}&\ge A_{\min\{i,j\},\max\{i,j\},p}
-                  -A^{\max}(1-c_{ijp}).
- \label{eq:support-area-gate}
-\end{align}
-
-Let $\widehat\alpha=1$ in \texttt{full} mode and let
-$\widehat\alpha=\alpha=r/s$ in \texttt{fraction} mode.  The implemented row is
+Therefore, the exact footprint-intersection area is
 \begin{equation}
- s\sum_{i\ne j}S_{ijp}+r\bar A_j f_{jp}\ge r b_{jp}
- \qquad\forall j,p.
- \label{eq:fraction-support}
+ A_{ij}=q^x_{ij}q^y_{ij}.
+ \label{eq:overlap-area}
 \end{equation}
-For a raised assigned box, $f_{jp}=0$, and this is exactly the required
-supported-area fraction.  For a floor box, the term $r\bar A_jf_{jp}$ makes the
-row automatically feasible because $b_{jp}\le\bar A_j$.
 
-\section{Symmetry-breaking constraints}
-
-All candidate pallets are interchangeable.  The following always enforces a
-prefix of used pallet labels:
+The product is linearized exactly using a binary expansion.  The code compares
+the bit counts required by $\bar q^x_{ij}$ and $\bar q^y_{ij}$ and expands the
+shorter representation.  Let $q^b_{ij}$ denote the selected overlap length,
+$q^c_{ij}$ the other one, $\bar q^b_{ij}$ and $\bar q^c_{ij}$ their bounds, and
 \begin{equation}
- u_p\ge u_{p+1}\qquad p=0,\ldots,P^{\max}-2.
+ K_{ij}:=\max\left\{1,
+ \left\lceil\log_2(\bar q^b_{ij}+1)\right\rceil\right\}.
+\end{equation}
+The inserted linearization is
+\begin{align}
+ q^b_{ij}&=\sum_{k=0}^{K_{ij}-1}2^k\beta_{ijk},\label{eq:binary-overlap}\\
+ t_{ijk}&\le q^c_{ij},\label{eq:product-one}\\
+ t_{ijk}&\le\bar q^c_{ij}\beta_{ijk},\label{eq:product-two}\\
+ t_{ijk}&\ge q^c_{ij}-\bar q^c_{ij}(1-\beta_{ijk}),\label{eq:product-three}\\
+ A_{ij}&=\sum_{k=0}^{K_{ij}-1}2^kt_{ijk}.
+ \label{eq:area-sum}
+\end{align}
+With $t_{ijk}\ge0$, Eqs.~\eqref{eq:product-one}--\eqref{eq:product-three}
+give $t_{ijk}=\beta_{ijk}q^c_{ij}$ exactly.
+
+Only an area belonging to an activated direct contact may count as support:
+\begin{align}
+ S_{ij}&\le A_{\min\{i,j\},\max\{i,j\}},\label{eq:support-gate-one}\\
+ S_{ij}&\le A^{\max}c_{ij},\label{eq:support-gate-two}\\
+ S_{ij}&\ge A_{\min\{i,j\},\max\{i,j\}}-A^{\max}(1-c_{ij}).
+ \label{eq:support-gate-three}
+\end{align}
+Thus $S_{ij}=A_{\min\{i,j\},\max\{i,j\}}$ when $c_{ij}=1$ and $S_{ij}=0$
+when $c_{ij}=0$.
+
+With $\widetilde\alpha=r/s$, every box must satisfy
+\begin{equation}
+ s\sum_{i\in\Items\setminus\{j\}}S_{ij}
+ +r\bar A_jf_j
+ \ge rB_j
+ \qquad\forall j\in\Items.
+ \label{eq:fractional-support}
+\end{equation}
+For a raised box, $f_j=0$, so the selected direct-support areas must cover at
+least the rationalized fraction $r/s$ of its oriented base area.  For a floor
+box, $f_j=1$ and $B_j\le\bar A_j$, so the row is automatically satisfied.  In
+full mode, $r/s=1$.
+
+\section{Pallet-label and identical-item restrictions}
+\label{sec:symmetry}
+
+The model always orders candidate-pallet use as a prefix:
+\begin{equation}
+ u_p\ge u_{p+1}
+ \qquad p=0,\ldots,P^{\max}-2.
  \label{eq:pallet-prefix}
 \end{equation}
-Three additional families are controlled by configuration (all are enabled in
-the supplied default file):
-\begin{align}
- \sum_i v_i a_{ip}&\ge\sum_i v_i a_{i,p+1}
- &&\text{if \texttt{order\_pallet\_loads}},\label{eq:load-order}\\
- a_{0,0}&=1 &&\text{if \texttt{fix\_first\_item}}.\label{eq:first-item}
-\end{align}
+This is valid because pallet labels are interchangeable.
 
-For \texttt{order\_identical\_items}, boxes are grouped by the exact tuple
+If \texttt{order\_pallet\_loads} is enabled, the code also imposes
+\begin{equation}
+ \sum_{i\in\Items}v_i a_{ip}
+ \ge\sum_{i\in\Items}v_i a_{i,p+1}
+ \qquad p=0,\ldots,P^{\max}-2.
+ \label{eq:pallet-load-order}
+\end{equation}
+If \texttt{fix\_first\_item} is enabled, it imposes
+\begin{equation}
+ a_{0,0}=1.
+ \label{eq:first-item}
+\end{equation}
+
+\paragraph{Important interaction.}
+Each of Eqs.~\eqref{eq:pallet-load-order} and \eqref{eq:first-item} can select a
+valid pallet labeling in isolation, but their simultaneous use is not
+guaranteed to preserve a representative of every feasible packing.  For
+example, suppose a $10\times1\times1$ pallet must hold boxes of lengths 6, 5,
+and 5, with the length-6 box indexed first.  The only two-pallet arrangement
+puts the length-6 box alone and the two length-5 boxes together.  Fixing the
+first box to pallet 0 gives loads 6 and 10, whereas load ordering requires
+$6\ge10$.  The supplied default configuration currently enables both options.
+Consequently, with those settings the overall configured model can exclude a
+feasible packing even though the reduced coordinate geometry itself is exact.
+For an exact pallet-label reduction, at least one option should be disabled or
+the two conditions should be replaced by one compatible canonicalization.
+
+If \texttt{order\_identical\_items} is enabled, boxes are grouped by the exact
+key
 \begin{equation}
  (\mathrm{SKU},(\ell_i,w_i,h_i),\mathrm{weight},\mathrm{family},
  \mathrm{food},\mathrm{chemical},\mathrm{fragile},
  \mathrm{uprightOnly},\mathrm{priority}).
+ \label{eq:identical-key}
 \end{equation}
-For consecutive indices $(i,j)$ in any group,
+For every consecutive index pair $(i,j)$ in a group,
 \begin{equation}
- \sum_{p\in\Pallets}p\,a_{ip}\le\sum_{p\in\Pallets}p\,a_{jp}.
- \label{eq:identical-pallet}
+ \sum_{p\in\Pallets}p\,a_{ip}
+ \le\sum_{p\in\Pallets}p\,a_{jp}.
+ \label{eq:identical-pallet-order}
 \end{equation}
-Define the injective integer encoding
+Define the injective integer encoding of a grid point
 \begin{equation}
  \phi(x,y,z):=x(W+1)(H+1)+y(H+1)+z.
+ \label{eq:location-encoding}
 \end{equation}
-On any pallet to which both boxes are assigned, their local positions are
-ordered:
+When both boxes are assigned to pallet $p$, their local positions are ordered:
 \begin{equation}
- \phi(x_{ip},y_{ip},z_{ip})\le
- \phi(x_{jp},y_{jp},z_{jp})+M^{\rm loc}(2-a_{ip}-a_{jp}).
- \label{eq:identical-location}
+ \phi(x_i,y_i,z_i)
+ \le\phi(x_j,y_j,z_j)+M^{\rm loc}(2-a_{ip}-a_{jp})
+ \quad\forall p\in\Pallets.
+ \label{eq:identical-location-order}
 \end{equation}
-These constraints remove permutations of records treated as identical; they
-do not add a physical packing rule.
+These identical-item constraints remove permutations of records that the
+implementation regards as interchangeable; they do not add a physical packing
+requirement.
 
-\section{The \texttt{reduced\_exact} variant}
+\section{Model summary and limitations}
 
-If \texttt{model\_variant} is \texttt{reduced\_exact}, identical candidate
-pallets no longer receive copies of a box's geometry.  The assignment variables
-$a_{ip}$ and pallet-use variables $u_p$ remain, but orientation, coordinates,
-endpoints, direction relations, overlap lengths, areas, floor indicators, and
-contact variables drop their pallet index.  Thus, for example,
-\begin{equation}
- r_{io}\in\B,\quad (x_i,y_i,z_i)\in\Z_{\ge0}^3,\quad
- \lambda^a_{ij}\in\B,\quad c_{ij}\in\B.
-\end{equation}
-Only orientations that individually fit within $(L,W,H)$ are retained.  The
-global containment equations are
-\begin{align}
- \sum_o r_{io}&=1,\\
- \bar x_i=x_i+\sum_od^x_{io}r_{io}&\le L,quad
- \bar y_i=y_i+\sum_od^y_{io}r_{io}\le W,quad
- \bar z_i=z_i+\sum_od^z_{io}r_{io}\le H.
-\end{align}
-Non-overlap is activated only when a pair shares a candidate pallet:
-\begin{equation}
- \lambda^x_{ij}+\lambda^x_{ji}+\lambda^y_{ij}+\lambda^y_{ji}
- +\lambda^z_{ij}+\lambda^z_{ji}
- \ge a_{ip}+a_{jp}-1
- \quad\forall(i,j)\in\Pairs,p.
-\end{equation}
-The global direction variables are exact because their forward and reverse
-rows no longer need assignment deactivation terms.
+The reduced MILP chooses one pallet, one retained orientation, and one integer
+coordinate for every physical box.  It minimizes used pallets while enforcing
+pallet activation, conservative grid containment, volume capacity, pairwise
+non-overlap, the configured support rule, and enabled label/order restrictions.
 
-For support, $f_j$ indicates $z_j=0$.  A contact $c_{ij}$ is permitted only if
-$i$ and $j$ have the same assignment vector; this is enforced for every $p$ by
-\begin{equation}
- c_{ij}\le1-a_{ip}+a_{jp},\qquad
- c_{ij}\le1+a_{ip}-a_{jp}.
-\end{equation}
-It also enforces $\bar z_i=z_j$.  In direct mode it is gated by positive
-horizontal overlap.  In fractional/full mode its gated intersection area is
-used exactly as above.  The support row becomes
-\begin{equation}
- s\sum_{i\ne j}S_{ij}+r\bar A_jf_j
- \ge r\sum_{o\in\Orients_j}d^x_{jo}d^y_{jo}r_{jo}.
-\end{equation}
-The objective, volume bounds, assignment, activation, and symmetry logic are
-otherwise the same.  This variant is exact for the same discretized problem:
-because every pallet has identical dimensions, a box needs only one local
-coordinate and orientation for the single pallet to which it is assigned.
-
-\section{What is and is not guaranteed}
-
-The selected model is exact with respect to integer grid coordinates, its
-allowed orientation list, its configured support mode, and at most
-$P^{\max}$ candidate pallets.  The conservative rounding may exclude a
-continuous packing that relies on sub-grid dimensions or positions.  The
-volume bound strengthens the model but never replaces geometric non-overlap.
-
-The model does not currently enforce pallet payload weight, center of mass,
-density, food--chemical separation, fragile-box restrictions, family
-compatibility, or retrieval accessibility.  These fields remain available for
-future extensions and for reporting, but no such constraint should be inferred
-from the present solver output.
+The formulation is discrete: it does not search arbitrary continuous
+coordinates, and conservative rounding may exclude packings that require
+sub-grid dimensions or positions.  It also does not enforce payload weight,
+center of mass, density, food--chemical separation, fragile-box restrictions,
+family compatibility, retrieval accessibility, or a height-balancing
+objective.  Those attributes should not be inferred from the generated
+solution merely because they are present in the input and output records.
 
 \end{document}

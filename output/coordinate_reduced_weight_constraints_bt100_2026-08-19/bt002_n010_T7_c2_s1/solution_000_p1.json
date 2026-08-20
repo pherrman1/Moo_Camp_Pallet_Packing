@@ -7,8 +7,13 @@
     "volume_utilization": 0.1589988425925926,
     "objective_bound": 1.0,
     "mip_gap": 0.0,
-    "runtime_seconds": 15.601699999999255,
-    "grid_mm": 50
+    "runtime_seconds": 20.41633650008589,
+    "grid_mm": 50,
+    "pallet_payload_capacity_kg": 1000.0,
+    "pallet_payloads_kg": {
+      "1": 97.55999999999999
+    },
+    "stacking_mass_alpha": 1.2
   },
   "placements": [
     {

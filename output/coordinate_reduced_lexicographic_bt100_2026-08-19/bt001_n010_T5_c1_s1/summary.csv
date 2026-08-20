@@ -1,0 +1,2 @@
+status,pallet_count,max_height_mm,volume_utilization,objective_bound,mip_gap,runtime_seconds
+TIME_LIMIT,1,1350,0.10908564814814815,1.0,0.0,60.091477400041185
